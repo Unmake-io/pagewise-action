@@ -23,7 +23,7 @@ jobs:
         with:
           ref: ${{ github.event.deployment.sha }}
           fetch-depth: 2
-      - uses: Unmake-io/pagewise-action@v0
+      - uses: Unmake-io/pagewise-action@main
         with:
           site-url: https://your-domain.com
 ```

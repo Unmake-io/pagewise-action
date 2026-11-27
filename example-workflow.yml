@@ -28,7 +28,7 @@ jobs:
         with:
           ref: ${{ github.event.deployment.sha || github.sha }}
           fetch-depth: 2
-      - uses: Unmake-io/pagewise-action@v0
+      - uses: Unmake-io/pagewise-action@main
         with:
           # Production is scanned on its public domain; previews on their own URL.
           site-url: ${{ (github.event_name == 'workflow_dispatch' || github.event.deployment.environment == 'Production') && vars.PAGEWISE_SITE_URL || github.event.deployment_status.environment_url }}
