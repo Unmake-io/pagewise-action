@@ -63,11 +63,26 @@ console.log(summary);
 
 // Upload when a Pagewise API is configured; otherwise the workflow keeps the report as an artifact.
 if (process.env.PAGEWISE_API_URL && process.env.PAGEWISE_TOKEN) {
-  const res = await fetch(process.env.PAGEWISE_API_URL.replace(/\/$/, '') + '/api/scans', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', authorization: 'Bearer ' + process.env.PAGEWISE_TOKEN },
-    body: JSON.stringify({ meta, data }),
-  });
-  if (!res.ok) { console.error('Pagewise: upload failed with status', res.status); process.exit(1); }
-  console.log('Pagewise: report uploaded. Screenshots follow in the next step.');
+  const api = process.env.PAGEWISE_API_URL.replace(/\/$/, '');
+  const auth = { authorization: 'Bearer ' + process.env.PAGEWISE_TOKEN };
+  const res = await fetch(api + '/api/scans', { method: 'POST', headers: { 'content-type': 'application/json', ...auth }, body: JSON.stringify({ meta, data }) });
+  if (!res.ok) { console.error('Pagewise: upload failed with status', res.status, await res.text()); process.exit(1); }
+  const { scanId, uploads } = await res.json();
+  console.log('Pagewise: report stored (scan ' + scanId + '). Uploading captures…');
+  // Full-page captures go straight to storage with one-time tokens; Pagewise only records where they landed.
+  const { put } = await import('@vercel/blob');
+  const captures = {};
+  const entries = Object.entries(uploads || {});
+  let next = 0;
+  await Promise.all(Array.from({ length: 6 }, async () => {
+    while (next < entries.length) {
+      const [pagePath, u] = entries[next++];
+      const file = path.join(out, 'thumbs', data.pages[pagePath].id + '.jpg');
+      if (!fs.existsSync(file)) continue;
+      try { const b = await put(u.pathname, fs.readFileSync(file), { access: 'public', token: u.clientToken, contentType: 'image/jpeg', addRandomSuffix: true }); captures[pagePath] = b.url; }
+      catch (e) { console.warn('Pagewise: capture upload failed for', pagePath, String(e.message || e)); }
+    }
+  }));
+  const c = await fetch(api + '/api/scans/' + scanId + '/captures', { method: 'POST', headers: { 'content-type': 'application/json', ...auth }, body: JSON.stringify({ captures }) });
+  console.log('Pagewise: ' + Object.keys(captures).length + ' captures saved' + (c.ok ? '.' : ' (recording them failed: ' + c.status + ').'));
 }
