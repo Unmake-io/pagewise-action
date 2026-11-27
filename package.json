@@ -1,0 +1,11 @@
+{
+  "name": "pagewise-action",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Pagewise scanner: page inventory, SEO, accessibility and UI consistency for deployed Next.js sites.",
+  "dependencies": {
+    "axe-core": "4.10.2",
+    "puppeteer-core": "23.11.1"
+  }
+}

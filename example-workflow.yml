@@ -1,0 +1,39 @@
+# Pagewise: scans the site after each successful Vercel deployment.
+# Read-only: it checks out the repo to read its routes, loads the deployed pages and reports what it finds.
+# It never pushes, comments or changes anything.
+name: Pagewise
+
+on:
+  deployment_status:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: auto or full
+        default: full
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pagewise-${{ github.event.deployment.environment || 'manual' }}
+  cancel-in-progress: true
+
+jobs:
+  scan:
+    if: github.event_name == 'workflow_dispatch' || github.event.deployment_status.state == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.deployment.sha || github.sha }}
+          fetch-depth: 2
+      - uses: Unmake-io/pagewise-action@v0
+        with:
+          # Production is scanned on its public domain; previews on their own URL.
+          site-url: ${{ (github.event_name == 'workflow_dispatch' || github.event.deployment.environment == 'Production') && vars.PAGEWISE_SITE_URL || github.event.deployment_status.environment_url }}
+          environment: ${{ github.event.deployment.environment || 'Production' }}
+          mode: ${{ inputs.mode || 'auto' }}
+          vercel-bypass-secret: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+          api-url: ${{ vars.PAGEWISE_API_URL }}
+          token: ${{ secrets.PAGEWISE_TOKEN }}
