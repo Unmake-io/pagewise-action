@@ -6,6 +6,7 @@ snapshot of each, and deterministic checks, no AI:
 - **SEO** and **Indexing**: titles, descriptions, canonicals, noindex left on in production, sitemap URLs that 404 or
   redirect, sitemaps on the wrong domain, broken internal links, redirect chains.
 - **Sharing**: how each page shows on X, LinkedIn and Slack (image loads, size, ratio, `twitter:card`).
+- **Security**: HTTPS, HSTS, CSP, clickjacking, referrer and permissions policies, CORS, mixed content, exposed `.env` / `.git` files, public source maps, secrets in client code, tracking cookies before consent.
 - **Accessibility** (axe-core), **Performance** (weights, images, render-blocking scripts, layout shifts),
   **Agents** (content readable without JavaScript, structured data, llms.txt, AI crawlers), **Structure**, **UI consistency**.
 - **DESIGN.md**: the design rules measured on the live site (tokens and where they are declared, the primary button,
@@ -26,8 +27,8 @@ Add `.github/workflows/pagewise.yml` from `example-workflow.yml`, then set:
 | Setting | Where | What |
 |---|---|---|
 | `PAGEWISE_SITE_URL` | repository variable | Production URL, for example `https://acme.com` |
-| `PAGEWISE_PREVIEW_URL` | repository variable | Preview URL template for reviews, for example `https://acme-git-{branch}-acmeteam.vercel.app` |
-| `VERCEL_AUTOMATION_BYPASS_SECRET` | secret | Only if previews are protected (Vercel › Settings › Deployment Protection › Protection Bypass for Automation) |
+| `PAGEWISE_PREVIEW_URL` | repository variable | Not needed when Vercel is connected in Pagewise. Otherwise the preview URL template, for example `https://acme-git-{branch}-acmeteam.vercel.app` |
+| `VERCEL_AUTOMATION_BYPASS_SECRET` | secret | Not needed when Vercel is connected in Pagewise. Otherwise, only if previews are protected (Vercel › Settings › Deployment Protection › Protection Bypass for Automation) |
 | `PAGEWISE_API_URL`, `PAGEWISE_TOKEN` | variable, secret | Optional: send production scans to the Pagewise app |
 
 The report (`data.json`, `DESIGN.md`, snapshots, `review.md` for previews) is kept as the `pagewise-report` artifact.

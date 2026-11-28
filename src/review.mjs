@@ -26,7 +26,7 @@ export async function review({ data, site, prodSite, only, repo, out, event }) {
   let md = `${MARK}\n### Pagewise review\n\n`;
 
   if (blocked && blocked >= scanned.length / 2) {
-    md += `The preview at ${site} asks for a sign-in, so Pagewise could not read it. Add the project's Vercel "Protection Bypass for Automation" secret as \`vercel-bypass-secret\`.\n`;
+    md += `The preview at ${site} asks for a sign-in, so Pagewise could not read it. Connect Vercel in Pagewise (one click, it creates the access for you), or add the project's Vercel "Protection Bypass for Automation" secret as \`vercel-bypass-secret\`.\n`;
     return publish(md, event, out);
   }
 

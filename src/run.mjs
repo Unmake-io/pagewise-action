@@ -41,8 +41,18 @@ function previewUrl() {
   const t = process.env.PAGEWISE_PREVIEW_URL || '';
   return t.includes('{branch}') ? (branch ? t.replace('{branch}', slug(branch)) : '') : t;
 }
-const site = (kind === 'review' ? previewUrl() : prodSite).replace(/\/$/, '');
-if (kind === 'review' && !site) { console.log('Pagewise: preview deployment, but no preview URL to scan. Set the preview-url input (for example https://myapp-git-{branch}-myteam.vercel.app). Skipping.'); process.exit(0); }
+// With Vercel connected in Pagewise, the preview's URL and its protection bypass come from there: nothing to set up.
+let ctx = null;
+if (kind === 'review' && process.env.PAGEWISE_API_URL && process.env.PAGEWISE_TOKEN) {
+  try {
+    const sha = event.deployment?.sha || event.sha || event.pull_request?.head?.sha || process.env.GITHUB_SHA;
+    const r = await fetch(process.env.PAGEWISE_API_URL.replace(/\/$/, '') + '/api/review-context?sha=' + encodeURIComponent(sha || ''), { headers: { authorization: 'Bearer ' + process.env.PAGEWISE_TOKEN } });
+    if (r.ok) ctx = await r.json();
+  } catch {}
+  if (ctx?.bypass) { console.log('::add-mask::' + ctx.bypass); if (!process.env.VERCEL_BYPASS_SECRET) process.env.VERCEL_BYPASS_SECRET = ctx.bypass; }
+}
+const site = (kind === 'review' ? ((evName === 'deployment_status' ? previewUrl() : '') || ctx?.previewUrl || previewUrl() || '') : prodSite).replace(/\/$/, '');
+if (kind === 'review' && !site) { console.log('Pagewise: preview deployment, but no preview URL to scan. Connect Vercel in Pagewise, or set the preview-url input (for example https://myapp-git-{branch}-myteam.vercel.app). Skipping.'); process.exit(0); }
 const repo = path.resolve(process.env.PAGEWISE_REPO_DIR || process.env.GITHUB_WORKSPACE || '.');
 const out = path.resolve(process.env.PAGEWISE_OUT || 'pagewise-report');
 const mode = process.env.PAGEWISE_MODE || 'auto';

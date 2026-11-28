@@ -79,6 +79,9 @@ async function worker() {
   await page.setUserAgent(UA);
   if (Object.keys(HEADERS).length) await page.setExtraHTTPHeaders(HEADERS);
   await page.emulateMediaFeatures([{ name: 'prefers-reduced-motion', value: 'reduce' }]);
+  // Cookies: the scanner never answers a consent banner, so any cookie found here was set before consent.
+  const cdp = await page.createCDPSession();
+  const seenCookies = new Set();
   while (idx < queue.length) {
     const q = queue[idx++];
     const id = q.path === '/' ? 'home' : q.path.slice(1).replace(/[^a-z0-9]+/gi, '-');
@@ -109,6 +112,7 @@ async function worker() {
           robots: meta('meta[name="robots"]'),
           ogTitle: meta('meta[property="og:title"]'),
           ogImage: meta('meta[property="og:image"]'),
+          legal: [...document.querySelectorAll('a[href]')].filter((a) => /privacy|confidentialit|datenschutz|privacidad|cookie|mentions|legal|impressum|terms|cgu|cgv/i.test((a.innerText || '') + ' ' + a.getAttribute('href'))).slice(0, 12).map((a) => ({ text: (a.innerText || '').trim().slice(0, 40), href: a.href })),
           share: {
             ogTitle: meta('meta[property="og:title"]'), ogDescription: meta('meta[property="og:description"]'),
             ogImage: meta('meta[property="og:image"]'), ogImageRaw: document.querySelector('meta[property="og:image"]')?.getAttribute('content') || null,
@@ -158,6 +162,8 @@ async function worker() {
           noDims: !(i.getAttribute('width') && i.getAttribute('height')) && getComputedStyle(i).aspectRatio === 'auto', lazy: i.loading === 'lazy', sel: sel(i),
         }));
         const blocking = [...document.querySelectorAll('head script[src]:not([async]):not([defer]):not([type=module]):not([nomodule])')].map((s) => s.src);
+        const insecure = location.protocol === 'https:' ? [...new Set([...res.map((r) => r.name), ...[...document.querySelectorAll('img[src],script[src],link[href],iframe[src],video[src],audio[src],source[src]')].map((e) => e.src || e.href)].filter((u) => /^http:\/\//.test(u || '')))].slice(0, 20) : [];
+        const scripts = [...new Set(res.filter((r) => /\.m?js(\?|$)/.test(r.name) || r.initiatorType === 'script').map((r) => r.name).filter((u) => { try { return new URL(u).host === location.host; } catch { return false; } }))];
         const thirdParty = [...new Set(res.map((r) => { try { return new URL(r.name).host; } catch { return ''; } }).filter((h) => h && h !== location.host))];
         // Clickable things agents cannot recognise: pointer cursor on an element that is not a link, button or control.
         const fake = {};
@@ -169,7 +175,7 @@ async function worker() {
         }
         const ld = [...document.querySelectorAll('script[type="application/ld+json"]')].map((s) => { try { const j = JSON.parse(s.textContent); const items = Array.isArray(j) ? j : j['@graph'] || [j]; return { ok: true, types: items.map((x) => x['@type']).flat().filter(Boolean) }; } catch { return { ok: false, types: [] }; } });
         return {
-          perf: { ttfb: Math.round(nav.responseStart || 0), dcl: Math.round(nav.domContentLoadedEventEnd || 0), lcp: Math.round(lcp), lcpEl, cls: +cls.toFixed(3), shifts, requests: res.length + 1, bytes: { html: nav.transferSize || nav.encodedBodySize || 0, ...by }, images, blocking, thirdParty },
+          perf: { insecure, scripts, ttfb: Math.round(nav.responseStart || 0), dcl: Math.round(nav.domContentLoadedEventEnd || 0), lcp: Math.round(lcp), lcpEl, cls: +cls.toFixed(3), shifts, requests: res.length + 1, bytes: { html: nav.transferSize || nav.encodedBodySize || 0, ...by }, images, blocking, thirdParty },
           agents: { fakeButtons: fake, jsonld: ld, renderedText: (document.body.innerText || '').replace(/\s+/g, ' ').trim().length },
         };
       }, origin);
@@ -210,8 +216,11 @@ async function worker() {
       }
       t.capture = Date.now() - t0 - t.load - t.read - t.axe; t.total = Date.now() - t0;
       const hdr = resp?.headers() || {};
+      const cookies = [];
+      try { for (const c of (await cdp.send('Network.getAllCookies')).cookies) { const k = c.name + '@' + c.domain; if (seenCookies.has(k)) continue; seenCookies.add(k); cookies.push({ name: c.name, domain: c.domain, secure: c.secure, httpOnly: c.httpOnly, sameSite: c.sameSite || null, session: c.session, days: c.expires > 0 ? Math.round((c.expires * 1000 - Date.now()) / 864e5) : 0 }); } } catch {}
+      const sec = Object.fromEntries(['strict-transport-security', 'content-security-policy', 'content-security-policy-report-only', 'x-frame-options', 'x-content-type-options', 'referrer-policy', 'permissions-policy', 'access-control-allow-origin', 'access-control-allow-credentials', 'server', 'x-powered-by'].map((h) => [h, hdr[h] || null]));
       const hops = resp ? resp.request().redirectChain().map((r) => r.url()) : [];
-      results.push({ ...q, id, status: resp?.status() ?? 0, finalPath, redirected: finalPath !== q.path, xRobots: hdr['x-robots-tag'] || null, hops, ...data, ...extra, axe, timing: t, capturedHeight: Math.min(fullH, MAX_CAPTURE_HEIGHT), snapshot: true, image: snap.needsImage });
+      results.push({ ...q, id, status: resp?.status() ?? 0, finalPath, redirected: finalPath !== q.path, xRobots: hdr['x-robots-tag'] || null, hops, headers: sec, cookies, ...data, ...extra, axe, timing: t, capturedHeight: Math.min(fullH, MAX_CAPTURE_HEIGHT), snapshot: true, image: snap.needsImage });
       process.stdout.write('.');
     } catch (e) {
       results.push({ ...q, id, status: 0, error: String(e.message || e).slice(0, 200) });
@@ -226,7 +235,7 @@ await browser.close();
 // Agents that do not run JavaScript see the raw HTML: compare its text with what the browser rendered.
 const textOf = (html) => (html.match(/<body[\s\S]*<\/body>/i)?.[0] || html).replace(/<(script|style|noscript|template)[\s\S]*?<\/\1>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/&[a-z#0-9]+;/gi, ' ').replace(/\s+/g, ' ').trim().length;
 let ri = 0;
-await Promise.all(Array.from({ length: 8 }, async () => { while (ri < results.length) { const r = results[ri++]; if (!r.agents) continue; try { const raw = await (await fetch(origin + r.path, fetchOpts)).text(); r.agents.rawText = textOf(raw); } catch {} } }));
+await Promise.all(Array.from({ length: 8 }, async () => { while (ri < results.length) { const r = results[ri++]; if (!r.agents) continue; try { const raw = await (await fetch(origin + r.path, fetchOpts)).text(); r.agents.rawText = textOf(raw); r.rawHtml = raw.slice(0, 2e6); } catch {} } }));
 const site = { robots, llmsTxt: false, aiBlocked: [] };
 try { const l = await fetch(origin + '/llms.txt', fetchOpts); site.llmsTxt = l.ok && !/<html/i.test((await l.text()).slice(0, 200)); } catch {}
 { // AI crawlers fully disallowed in robots.txt
@@ -300,6 +309,68 @@ const shareImages = {};
 { const list = [...new Set(results.flatMap((r) => [r.share?.ogImage, r.share?.twImage]).filter((u) => u && /^https?:/.test(u)))]; let k = 0;
   await Promise.all(Array.from({ length: 8 }, async () => { while (k < list.length) { const u = list[k++]; shareImages[u] = await probeImage(u); } })); }
 console.log(`\nlink and sitemap checks: ${Object.keys(checked).length} URLs, share images: ${Object.keys(shareImages).length}, ${Math.round((Date.now() - tProbe) / 1000)}s`);
+
+// Security, from outside like any visitor: HTTPS redirect, files that should never be public, CORS, public source
+// maps, and secrets shipped in the site's own JavaScript or HTML. Read-only requests; findings are masked.
+const security = { httpRedirect: null, exposed: [], cors: null, sourceMaps: [], secrets: [], adminLogin: [] };
+if (!REVIEW && !ONLY) {
+  try {
+    const u = new URL(origin);
+    if (u.protocol === 'https:') {
+      const r = await fetch('http://' + u.host + '/', { ...fetchOpts, redirect: 'manual', signal: AbortSignal.timeout(10000) }).catch(() => null);
+      security.httpRedirect = r ? { status: r.status, location: r.headers.get('location') } : { status: 0 };
+    }
+  } catch {}
+  const FILES = [
+    ['/.env', (t) => /^[A-Z][A-Z0-9_]{2,}=/m.test(t)], ['/.env.local', (t) => /^[A-Z][A-Z0-9_]{2,}=/m.test(t)], ['/.env.production', (t) => /^[A-Z][A-Z0-9_]{2,}=/m.test(t)],
+    ['/.git/config', (t) => /\[core\]/.test(t)], ['/.git/HEAD', (t) => /^ref: refs\//.test(t)], ['/.DS_Store', (t, b) => b.slice(4, 8).toString() === 'Bud1'],
+    ['/.vercel/project.json', (t) => /"projectId"/.test(t)], ['/.npmrc', (t) => /_authToken/.test(t)], ['/backup.sql', (t) => /CREATE TABLE|INSERT INTO/i.test(t)], ['/dump.sql', (t) => /CREATE TABLE|INSERT INTO/i.test(t)],
+  ];
+  await Promise.all(FILES.map(async ([p, test]) => {
+    try {
+      const r = await fetch(origin + p, { ...fetchOpts, redirect: 'manual', signal: AbortSignal.timeout(10000) });
+      if (r.status !== 200) return;
+      const b = Buffer.from(await r.arrayBuffer()).subarray(0, 20000); const t = b.toString('utf8');
+      if (!/<html|<!doctype/i.test(t.slice(0, 500)) && test(t, b)) security.exposed.push(p);
+    } catch {}
+  }));
+  await Promise.all(['/admin', '/wp-admin/', '/wp-login.php', '/phpmyadmin/', '/administrator/'].map(async (p) => {
+    try { const r = await fetch(origin + p, { ...fetchOpts, signal: AbortSignal.timeout(10000) }); if (r.status === 200 && /type=["']?password/i.test(await r.text())) security.adminLogin.push(p); } catch {}
+  }));
+  try {
+    const r = await fetch(origin + '/', { ...fetchOpts, headers: { ...fetchOpts.headers, origin: 'https://pagewise-cors-check.example' }, signal: AbortSignal.timeout(10000) });
+    security.cors = { allowOrigin: r.headers.get('access-control-allow-origin'), credentials: r.headers.get('access-control-allow-credentials') };
+  } catch {}
+  // The site's own scripts: public source maps, and secrets that should only live on the server.
+  const scripts = [...new Set(results.flatMap((r) => r.perf?.scripts || []))].slice(0, 120);
+  const PATTERNS = [
+    ['Stripe secret key', /\b[rs]k_live_[0-9a-zA-Z]{20,}/g], ['Stripe test secret key', /\bsk_test_[0-9a-zA-Z]{20,}/g], ['AWS access key', /\bAKIA[0-9A-Z]{16}\b/g],
+    ['Private key', /-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----/g], ['GitHub token', /\b(?:gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{60,})/g],
+    ['Slack token', /\bxox[abprs]-[A-Za-z0-9-]{10,}/g], ['OpenAI API key', /\bsk-(?:proj-[A-Za-z0-9_-]{40,}|[A-Za-z0-9]{20}T3BlbkFJ[A-Za-z0-9]{20})/g],
+    ['Anthropic API key', /\bsk-ant-(?:api|admin)\d{2}-[A-Za-z0-9_-]{60,}/g], ['SendGrid API key', /\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}\b/g],
+    ['Supabase secret key', /\bsb_secret_[A-Za-z0-9_-]{20,}/g], ['Google service account', /"private_key_id"\s*:\s*"[0-9a-f]{20,}"/g],
+  ];
+  const mask = (v) => v.slice(0, Math.min(8, Math.floor(v.length / 3))) + '…(' + v.length + ' chars)';
+  const scanText = (text, where) => {
+    for (const [type, re] of PATTERNS) for (const m of text.matchAll(re)) security.secrets.push({ type, value: mask(m[0]), where });
+    for (const m of text.matchAll(/eyJ[A-Za-z0-9_-]{10,}\.(eyJ[A-Za-z0-9_-]{10,})\.[A-Za-z0-9_-]{10,}/g)) {
+      try { const pl = JSON.parse(Buffer.from(m[1], 'base64url').toString()); if (pl.role === 'service_role') security.secrets.push({ type: 'Supabase service_role key', value: mask(m[0]), where }); } catch {}
+    }
+  };
+  let si = 0;
+  await Promise.all(Array.from({ length: 8 }, async () => { while (si < scripts.length) { const u = scripts[si++]; try {
+    const r = await fetch(u, { ...fetchOpts, signal: AbortSignal.timeout(15000) }); if (!r.ok) continue;
+    const t = (await r.text()).slice(0, 4e6); scanText(t, u);
+    if (security.sourceMaps.length < 3 && (/\/\/# sourceMappingURL=(?!data:)/.test(t.slice(-500)) || si <= 6)) {
+      const mr = await fetch(u.split('?')[0] + '.map', { ...fetchOpts, signal: AbortSignal.timeout(10000) }).catch(() => null);
+      if (mr?.ok) { const head = (await mr.text()).slice(0, 2000); if (/"sources"\s*:/.test(head)) security.sourceMaps.push(u.split('?')[0] + '.map'); }
+    }
+  } catch {} } }));
+  for (const r of results) if (r.rawHtml) scanText(r.rawHtml, origin + r.path);
+  const seen = new Set(); security.secrets = security.secrets.filter((x) => { const k = x.type + x.value; if (seen.has(k)) return false; seen.add(k); return true; }).slice(0, 30);
+}
+for (const r of results) delete r.rawHtml;
+site.security = security;
 site.robotsBlocksAll = /disallow:\s*\/\s*($|\n)/i.test(robots.split(/\n(?=user-agent)/i).find((g) => /user-agent:\s*\*/i.test(g)) || '');
 site.sitemapHosts = Object.fromEntries(sitemapHosts);
 site.sitemapFound = sitemap.size > 0;
