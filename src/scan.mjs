@@ -283,6 +283,7 @@ async function probe(p) {
     const ctl = AbortSignal.timeout(10000);
     res = await fetch(url, { ...fetchOpts, method: 'HEAD', redirect: 'manual', signal: ctl }).catch(() => null);
     if (res && res.status === 405) res = await fetch(url, { ...fetchOpts, redirect: 'manual', signal: AbortSignal.timeout(10000) }).catch(() => null);
+    if (!res) res = await fetch(url, { ...fetchOpts, redirect: 'manual', signal: AbortSignal.timeout(25000) }).catch(() => null); // slow first render: one patient retry
     if (!res) return { status: 0, chain };
     if (res.status >= 300 && res.status < 400 && res.headers.get('location')) { chain.push(url); url = new URL(res.headers.get('location'), url).href; continue; }
     break;
