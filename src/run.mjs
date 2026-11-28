@@ -67,22 +67,32 @@ if (process.env.PAGEWISE_API_URL && process.env.PAGEWISE_TOKEN) {
   const auth = { authorization: 'Bearer ' + process.env.PAGEWISE_TOKEN };
   const res = await fetch(api + '/api/scans', { method: 'POST', headers: { 'content-type': 'application/json', ...auth }, body: JSON.stringify({ meta, data }) });
   if (!res.ok) { console.error('Pagewise: upload failed with status', res.status, await res.text()); process.exit(1); }
-  const { scanId, uploads } = await res.json();
-  console.log('Pagewise: report stored (scan ' + scanId + '). Uploading captures…');
-  // Full-page captures go straight to storage with one-time tokens; Pagewise only records where they landed.
+  const { scanId, uploads, css } = await res.json();
+  console.log('Pagewise: report stored (scan ' + scanId + '). Uploading snapshots…');
+  // Snapshots and stylesheets go straight to storage with one-time tokens; Pagewise only records where they landed.
   const { put } = await import('@vercel/blob');
+  const pool = async (items, fn) => { let i = 0; await Promise.all(Array.from({ length: 8 }, async () => { while (i < items.length) await fn(items[i++]); })); };
+  const cssUrl = {};
+  await pool(Object.entries(css || {}), async ([hash, u]) => {
+    try { cssUrl[hash] = (await put(u.pathname, fs.readFileSync(path.join(out, 'css', hash + '.css')), { access: 'public', token: u.clientToken, contentType: 'text/css', addRandomSuffix: false, allowOverwrite: true })).url; }
+    catch (e) { console.warn('Pagewise: stylesheet upload failed', hash, String(e.message || e)); }
+  });
   const captures = {};
-  const entries = Object.entries(uploads || {});
-  let next = 0;
-  await Promise.all(Array.from({ length: 6 }, async () => {
-    while (next < entries.length) {
-      const [pagePath, u] = entries[next++];
-      const file = path.join(out, 'thumbs', data.pages[pagePath].id + '.jpg');
-      if (!fs.existsSync(file)) continue;
-      try { const b = await put(u.pathname, fs.readFileSync(file), { access: 'public', token: u.clientToken, contentType: 'image/jpeg', addRandomSuffix: true }); captures[pagePath] = b.url; }
-      catch (e) { console.warn('Pagewise: capture upload failed for', pagePath, String(e.message || e)); }
-    }
-  }));
+  await pool(Object.entries(uploads || {}), async ([pagePath, u]) => {
+    const id = data.pages[pagePath].id, c = {};
+    try {
+      if (u.html) {
+        const f = path.join(out, 'snapshots', id + '.html');
+        if (fs.existsSync(f)) {
+          const html = fs.readFileSync(f, 'utf8').replace(/__PW_CSS__\/([0-9a-f]+)\.css/g, (m, h) => cssUrl[h] || m);
+          c.html = (await put(u.html.pathname, html, { access: 'public', token: u.html.clientToken, contentType: 'text/html', addRandomSuffix: true })).url;
+        }
+      }
+      const img = path.join(out, 'thumbs', id + '.jpg');
+      if (u.image && fs.existsSync(img)) c.image = (await put(u.image.pathname, fs.readFileSync(img), { access: 'public', token: u.image.clientToken, contentType: 'image/jpeg', addRandomSuffix: true })).url;
+    } catch (e) { console.warn('Pagewise: upload failed for', pagePath, String(e.message || e)); }
+    if (c.html || c.image) captures[pagePath] = c;
+  });
   const c = await fetch(api + '/api/scans/' + scanId + '/captures', { method: 'POST', headers: { 'content-type': 'application/json', ...auth }, body: JSON.stringify({ captures }) });
-  console.log('Pagewise: ' + Object.keys(captures).length + ' captures saved' + (c.ok ? '.' : ' (recording them failed: ' + c.status + ').'));
+  console.log('Pagewise: ' + Object.keys(captures).length + ' page snapshots saved' + (c.ok ? '.' : ' (recording them failed: ' + c.status + ').'));
 }

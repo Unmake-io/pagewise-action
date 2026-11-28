@@ -161,6 +161,7 @@ const out = {
     path: p.path, route: p.route, file: routeInfo.get(p.route)?.file, id: p.id, status: p.status, finalPath: p.finalPath, redirected: p.redirected,
     title: p.title, description: p.description, canonical: p.canonical, robots: p.robots, ogTitle: p.ogTitle, ogImage: p.ogImage, lang: p.lang, h1: p.h1,
     inSitemap: p.inSitemap, inbound: [...(inbound.get(p.path) || [])].length, outbound: (p.links || []).length, height: p.height,
+    snapshot: !!p.snapshot, image: !!p.image, css: p.css || [], timing: p.timing,
     issues: pageIssues(p.path).map((i) => i.id),
   }])),
   issues, designSystem, fonts, navCount,
