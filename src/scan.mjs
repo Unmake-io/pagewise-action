@@ -18,6 +18,10 @@ const ONLY = process.env.PAGEWISE_ONLY ? new Set(process.env.PAGEWISE_ONLY.split
 const UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131 Safari/537.36 PagewiseBot/0.1 (+https://github.com/Unmake-io/pagewise)';
 const HEADERS = process.env.VERCEL_BYPASS_SECRET ? { 'x-vercel-protection-bypass': process.env.VERCEL_BYPASS_SECRET, 'x-vercel-set-bypass-cookie': 'true' } : {};
 const fetchOpts = { headers: { 'user-agent': UA, ...HEADERS } };
+// Review of a preview deployment: the site's own absolute URLs (sitemap, robots) point at production, so they are
+// read on the preview instead, by path.
+const REVIEW = process.env.PAGEWISE_KIND === 'review';
+const here = (u) => { try { const x = new URL(u, origin); return REVIEW ? origin + x.pathname + x.search : x.href; } catch { return u; } };
 fs.mkdirSync(path.join(outDir, 'thumbs'), { recursive: true });
 
 const routes = readRoutes(repo);
@@ -27,7 +31,8 @@ const pub = routes.filter((r) => !r.isPrivate);
 async function sitemapUrls(u, seen = new Set()) {
   if (seen.has(u)) return [];
   seen.add(u);
-  const xml = await (await fetch(u, fetchOpts)).text();
+  let xml = '';
+  try { xml = await (await fetch(here(u), fetchOpts)).text(); } catch { return []; }
   const locs = [...xml.matchAll(/<loc>([^<]+)<\/loc>/g)].map((m) => m[1].trim());
   if (/<sitemapindex/.test(xml)) {
     const all = [];
@@ -36,10 +41,15 @@ async function sitemapUrls(u, seen = new Set()) {
   }
   return locs;
 }
-const robots = await (await fetch(origin + '/robots.txt', fetchOpts)).text();
+let robots = '';
+try { const r = await fetch(origin + '/robots.txt', fetchOpts); robots = r.ok ? await r.text() : ''; } catch {}
 const smList = [...robots.matchAll(/Sitemap:\s*(\S+)/gi)].map((m) => m[1]);
 const sitemap = new Set();
-for (const s of smList.length ? smList : [origin + '/sitemap.xml']) for (const u of await sitemapUrls(s)) sitemap.add(u.replace(/\/$/, '') || u);
+const sitemapHosts = new Map(); // host -> count, to catch a sitemap listing another domain (www, a preview, staging)
+for (const s of smList.length ? smList : [origin + '/sitemap.xml']) for (const u of await sitemapUrls(s)) {
+  sitemap.add(u.replace(/\/$/, '') || u);
+  try { const h = new URL(u).host; sitemapHosts.set(h, (sitemapHosts.get(h) || 0) + 1); } catch {}
+}
 
 const norm = (u) => { const x = new URL(u, origin); return (x.pathname.replace(/\/$/, '') || '/'); };
 
@@ -99,12 +109,35 @@ async function worker() {
           robots: meta('meta[name="robots"]'),
           ogTitle: meta('meta[property="og:title"]'),
           ogImage: meta('meta[property="og:image"]'),
+          share: {
+            ogTitle: meta('meta[property="og:title"]'), ogDescription: meta('meta[property="og:description"]'),
+            ogImage: meta('meta[property="og:image"]'), ogImageRaw: document.querySelector('meta[property="og:image"]')?.getAttribute('content') || null,
+            ogImageW: Number(meta('meta[property="og:image:width"]')) || null, ogImageH: Number(meta('meta[property="og:image:height"]')) || null,
+            ogUrl: meta('meta[property="og:url"]'), ogSiteName: meta('meta[property="og:site_name"]'), ogType: meta('meta[property="og:type"]'),
+            card: meta('meta[name="twitter:card"]'), twTitle: meta('meta[name="twitter:title"]'), twDescription: meta('meta[name="twitter:description"]'), twImage: meta('meta[name="twitter:image"]'),
+            icon: document.querySelector('link[rel~="icon"]')?.href || null,
+          },
           lang: document.documentElement.lang || null,
           h1: [...document.querySelectorAll('h1')].map((h) => h.innerText.trim().slice(0, 120)),
           imgNoAlt: [...document.querySelectorAll('img:not([alt])')].length,
           links: [...new Set(links)],
           buttons, fonts, navLinks,
           height: document.documentElement.scrollHeight,
+          design: (() => {
+            // What the page actually uses, counted on visible elements: the raw material for DESIGN.md.
+            const text = {}, bg = {}, size = {}, radius = {}, inc = (m, k) => { if (k) m[k] = (m[k] || 0) + 1; };
+            let n = 0;
+            for (const el of document.body.querySelectorAll('*')) {
+              if (++n > 4000) break;
+              const r = el.getBoundingClientRect(); if (!r.width || !r.height) continue;
+              const cs = getComputedStyle(el);
+              const ownText = [...el.childNodes].some((c) => c.nodeType === 3 && c.textContent.trim());
+              if (ownText) { inc(text, cs.color); inc(size, cs.fontSize); }
+              if (cs.backgroundColor !== 'rgba(0, 0, 0, 0)') inc(bg, cs.backgroundColor);
+              if (parseFloat(cs.borderTopLeftRadius) > 0 && r.width > 16) inc(radius, cs.borderTopLeftRadius);
+            }
+            return { text, bg, size, radius };
+          })(),
         };
       }, origin);
       // Performance and agent-readiness, read from what this load already produced (no extra page load).
@@ -176,7 +209,9 @@ async function worker() {
         await page.screenshot(shot);
       }
       t.capture = Date.now() - t0 - t.load - t.read - t.axe; t.total = Date.now() - t0;
-      results.push({ ...q, id, status: resp?.status() ?? 0, finalPath, redirected: finalPath !== q.path, ...data, ...extra, axe, timing: t, capturedHeight: Math.min(fullH, MAX_CAPTURE_HEIGHT), snapshot: true, image: snap.needsImage });
+      const hdr = resp?.headers() || {};
+      const hops = resp ? resp.request().redirectChain().map((r) => r.url()) : [];
+      results.push({ ...q, id, status: resp?.status() ?? 0, finalPath, redirected: finalPath !== q.path, xRobots: hdr['x-robots-tag'] || null, hops, ...data, ...extra, axe, timing: t, capturedHeight: Math.min(fullH, MAX_CAPTURE_HEIGHT), snapshot: true, image: snap.needsImage });
       process.stdout.write('.');
     } catch (e) {
       results.push({ ...q, id, status: 0, error: String(e.message || e).slice(0, 200) });
@@ -202,10 +237,80 @@ try { const l = await fetch(origin + '/llms.txt', fetchOpts); site.llmsTxt = l.o
   }
 }
 
+
+// Indexation: every URL the site points to (internal links of scanned pages, and on full scans the whole sitemap)
+// gets a light request, redirects followed by hand, so 404s, redirect chains and noindex headers show up without
+// loading those pages in the browser.
+const scannedPaths = new Set(results.map((r) => r.path));
+const toCheck = new Map(); // path -> { fromSitemap, from:Set }
+const want = (p, o) => { if (scannedPaths.has(p)) return; if (!toCheck.has(p)) toCheck.set(p, { fromSitemap: false, from: new Set() }); const c = toCheck.get(p); if (o.sitemap) c.fromSitemap = true; if (o.from) c.from.add(o.from); };
+for (const r of results) for (const l of r.links || []) if (!routes.some((x) => x.isPrivate && (l === x.route || l.startsWith(x.route + '/')))) want(l, { from: r.path });
+// Sitemap: every URL of the static routes and of anything unmatched; dynamic routes are sampled (up to 40 each),
+// which is enough to catch a broken template or a stale data source without requesting thousands of pages.
+if (!ONLY) {
+  for (const u of unmatched) want(u, { sitemap: true });
+  for (const r of byRoute.values()) for (const p of r.dynamic ? r.sitemapUrls.filter((_, i, a) => a.length <= 40 || i % Math.ceil(a.length / 40) === 0) : r.sitemapUrls) want(p, { sitemap: true });
+}
+async function probe(p) {
+  const chain = []; let url = origin + p, res;
+  for (let hop = 0; hop < 6; hop++) {
+    const ctl = AbortSignal.timeout(10000);
+    res = await fetch(url, { ...fetchOpts, method: 'HEAD', redirect: 'manual', signal: ctl }).catch(() => null);
+    if (res && res.status === 405) res = await fetch(url, { ...fetchOpts, redirect: 'manual', signal: AbortSignal.timeout(10000) }).catch(() => null);
+    if (!res) return { status: 0, chain };
+    if (res.status >= 300 && res.status < 400 && res.headers.get('location')) { chain.push(url); url = new URL(res.headers.get('location'), url).href; continue; }
+    break;
+  }
+  return { status: res.status, chain, final: url, xRobots: res.headers.get('x-robots-tag') };
+}
+const checked = {};
+const tProbe = Date.now();
+{ const list = [...toCheck.keys()].slice(0, 3000); let k = 0;
+  await Promise.all(Array.from({ length: 16 }, async () => { while (k < list.length) { const p = list[k++]; const c = toCheck.get(p); checked[p] = { ...(await probe(p)), fromSitemap: c.fromSitemap, from: [...c.from].slice(0, 20) }; } })); }
+
+// Share previews: each Open Graph / X image is fetched once, reading only its first bytes for the dimensions.
+function imageSize(b) {
+  if (b[0] === 0x89 && b[1] === 0x50) return { w: b.readUInt32BE(16), h: b.readUInt32BE(20), type: 'png' };
+  if (b.slice(0, 3).toString() === 'GIF') return { w: b.readUInt16LE(6), h: b.readUInt16LE(8), type: 'gif' };
+  if (b.slice(0, 4).toString() === 'RIFF' && b.slice(8, 12).toString() === 'WEBP') {
+    const f = b.slice(12, 16).toString();
+    if (f === 'VP8 ') return { w: b.readUInt16LE(26) & 0x3fff, h: b.readUInt16LE(28) & 0x3fff, type: 'webp' };
+    if (f === 'VP8L') { const x = b.readUInt32LE(21); return { w: (x & 0x3fff) + 1, h: ((x >> 14) & 0x3fff) + 1, type: 'webp' }; }
+    if (f === 'VP8X') return { w: 1 + b.readUIntLE(24, 3), h: 1 + b.readUIntLE(27, 3), type: 'webp' };
+  }
+  if (b[0] === 0xff && b[1] === 0xd8) {
+    let i = 2;
+    while (i + 9 < b.length) { if (b[i] !== 0xff) { i++; continue; } const m = b[i + 1], len = b.readUInt16BE(i + 2); if (m >= 0xc0 && m <= 0xcf && ![0xc4, 0xc8, 0xcc].includes(m)) return { w: b.readUInt16BE(i + 7), h: b.readUInt16BE(i + 5), type: 'jpeg' }; i += 2 + len; }
+    return { type: 'jpeg' };
+  }
+  return { type: 'unknown' };
+}
+async function probeImage(u) {
+  try {
+    const res = await fetch(here(u), { ...fetchOpts, signal: AbortSignal.timeout(15000) });
+    const type = res.headers.get('content-type') || '';
+    const reader = res.body?.getReader(); const parts = []; let got = 0;
+    while (reader && got < 65536) { const { done, value } = await reader.read(); if (done) break; parts.push(value); got += value.length; }
+    reader?.cancel().catch(() => {});
+    const { type: format, ...dims } = imageSize(Buffer.concat(parts.map((p) => Buffer.from(p))));
+    return { status: res.status, type, format, bytes: Number(res.headers.get('content-length')) || null, ...dims };
+  } catch (e) { return { status: 0, error: String(e.message || e).slice(0, 120) }; }
+}
+const shareImages = {};
+{ const list = [...new Set(results.flatMap((r) => [r.share?.ogImage, r.share?.twImage]).filter((u) => u && /^https?:/.test(u)))]; let k = 0;
+  await Promise.all(Array.from({ length: 8 }, async () => { while (k < list.length) { const u = list[k++]; shareImages[u] = await probeImage(u); } })); }
+console.log(`\nlink and sitemap checks: ${Object.keys(checked).length} URLs, share images: ${Object.keys(shareImages).length}, ${Math.round((Date.now() - tProbe) / 1000)}s`);
+site.robotsBlocksAll = /disallow:\s*\/\s*($|\n)/i.test(robots.split(/\n(?=user-agent)/i).find((g) => /user-agent:\s*\*/i.test(g)) || '');
+site.sitemapHosts = Object.fromEntries(sitemapHosts);
+site.sitemapFound = sitemap.size > 0;
+site.checked = checked;
+site.shareImages = shareImages;
+
 // Stylesheets: fetched once, url() made absolute, stored by content hash and linked from every snapshot.
 const { createHash } = await import('node:crypto');
 fs.mkdirSync(path.join(outDir, 'css'), { recursive: true });
 const cssMap = {};
+const tokens = {};
 for (const href of sheetUrls) {
   try {
     const text = await (await fetch(href, fetchOpts)).text();
@@ -213,6 +318,12 @@ for (const href of sheetUrls) {
     const hash = createHash('sha1').update(abs).digest('hex').slice(0, 16);
     fs.writeFileSync(path.join(outDir, 'css', hash + '.css'), abs);
     cssMap[href] = hash;
+    // Design tokens: custom properties, where they are declared and how often the CSS uses them.
+    for (const m of abs.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+      const scope = m[1].trim().split(/\s*,\s*/).slice(0, 2).join(', ').slice(0, 60);
+      for (const d of m[2].matchAll(/(--[\w-]+)\s*:\s*([^;]+)/g)) { const t = (tokens[d[1]] ||= { values: {}, uses: 0 }); t.values[scope] ||= d[2].trim().slice(0, 80); }
+    }
+    for (const u of abs.matchAll(/var\((--[\w-]+)/g)) (tokens[u[1]] ||= { values: {}, uses: 0 }).uses++;
   } catch { /* the snapshot keeps the original link */ }
 }
 for (const r of results) {
@@ -225,7 +336,7 @@ for (const r of results) {
   r.css = [...new Set([...html.matchAll(/__PW_CSS__\/([0-9a-f]+)\.css/g)].map((m) => m[1]))];
 }
 
-fs.writeFileSync(path.join(outDir, 'raw.json'), JSON.stringify({ origin, site, partial: !!ONLY, scannedRoutes: ONLY ? [...ONLY] : null, scannedAt: new Date().toISOString(), routes: [...byRoute.values()], unmatched, sitemapCount: sitemap.size, privateRoutes: routes.filter((r) => r.isPrivate).map((r) => ({ route: r.route, file: r.file })), pages: results }, null, 1));
+fs.writeFileSync(path.join(outDir, 'raw.json'), JSON.stringify({ origin, review: REVIEW, tokens, site, partial: !!ONLY, scannedRoutes: ONLY ? [...ONLY] : null, scannedAt: new Date().toISOString(), routes: [...byRoute.values()], unmatched, sitemapCount: sitemap.size, privateRoutes: routes.filter((r) => r.isPrivate).map((r) => ({ route: r.route, file: r.file })), pages: results }, null, 1));
 const timed = results.filter((r) => r.timing).sort((a, b) => b.timing.total - a.timing.total);
 const sum = (k) => Math.round(timed.reduce((n, r) => n + (r.timing[k] || 0), 0) / 1000);
 console.log('\nscanned', results.length, 'pages; sitemap', sitemap.size, 'urls; unmatched', unmatched.length);

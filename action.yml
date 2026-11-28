@@ -1,5 +1,5 @@
 name: Pagewise scan
-description: Inventory every page of a deployed Next.js site, audit SEO, accessibility and UI consistency, and keep a full-page capture of each page. Read-only.
+description: Inventory every page of a deployed Next.js site, audit SEO, indexing, share previews, accessibility, performance and UI consistency, write DESIGN.md, and review preview deployments against production. Read-only on your code.
 branding:
   icon: layout
   color: blue
@@ -19,6 +19,18 @@ inputs:
     description: How many pages to scan for each dynamic route ([slug] and the like).
     required: false
     default: '4'
+  kind:
+    description: '"auto" decides from the deployment event (production, or a preview to review), or force "production" / "review".'
+    required: false
+    default: auto
+  preview-url:
+    description: 'Preview to review when the event does not carry its URL (Vercel commit statuses). Use {branch} for the branch, for example https://myapp-git-{branch}-myteam.vercel.app'
+    required: false
+    default: ''
+  github-token:
+    description: Token used to comment the review on the pull request (needs "pull-requests: write" in the workflow).
+    required: false
+    default: ${{ github.token }}
   vercel-bypass-secret:
     description: Vercel "Protection Bypass for Automation" secret, only needed for protected preview deployments.
     required: false
@@ -46,6 +58,9 @@ runs:
         PAGEWISE_SITE_URL: ${{ inputs.site-url }}
         PAGEWISE_ENVIRONMENT: ${{ inputs.environment }}
         PAGEWISE_MODE: ${{ inputs.mode }}
+        PAGEWISE_KIND: ${{ inputs.kind }}
+        PAGEWISE_PREVIEW_URL: ${{ inputs.preview-url }}
+        GITHUB_TOKEN: ${{ inputs.github-token }}
         PAGEWISE_SAMPLES: ${{ inputs.samples-per-dynamic-route }}
         PAGEWISE_REPO_DIR: ${{ github.workspace }}
         PAGEWISE_OUT: ${{ runner.temp }}/pagewise-report

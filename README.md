@@ -1,31 +1,33 @@
 # Pagewise Action
 
-Scans a deployed Next.js site after each Vercel deployment: every page from the repo's routes and the sitemap,
-a full-page capture of each, and deterministic checks (SEO, accessibility with axe-core, UI consistency from computed styles).
+Scans a deployed Next.js site after each Vercel deployment: every page from the repo's routes and the sitemap, an HTML
+snapshot of each, and deterministic checks, no AI:
 
-Read-only: it checks out your repo to read its routes and loads your public pages. It never pushes, comments or edits anything.
-It identifies itself as `PagewiseBot` and never clicks consent banners or submits forms.
+- **SEO** and **Indexing**: titles, descriptions, canonicals, noindex left on in production, sitemap URLs that 404 or
+  redirect, sitemaps on the wrong domain, broken internal links, redirect chains.
+- **Sharing**: how each page shows on X, LinkedIn and Slack (image loads, size, ratio, `twitter:card`).
+- **Accessibility** (axe-core), **Performance** (weights, images, render-blocking scripts, layout shifts),
+  **Agents** (content readable without JavaScript, structured data, llms.txt, AI crawlers), **Structure**, **UI consistency**.
+- **DESIGN.md**: the design rules measured on the live site (tokens and where they are declared, the primary button,
+  text sizes, hard-coded colours, drift), for your coding agent to read before it touches the UI.
+
+On a **preview** deployment it compares the preview with the last production scan and writes the review (pages added
+or removed, changed titles and canonicals, new issues, issues fixed) to the job summary and to one comment on the pull
+request, kept up to date.
+
+Read-only on your code: it checks out the repo to read its routes and loads your pages. Its only write is the review
+comment, and only if the workflow grants `pull-requests: write`. It identifies itself as `PagewiseBot` and never clicks
+consent banners or submits forms.
 
 ## Usage
 
-Add `.github/workflows/pagewise.yml` (see `example-workflow.yml`):
+Add `.github/workflows/pagewise.yml` from `example-workflow.yml`, then set:
 
-```yaml
-on: deployment_status
-permissions:
-  contents: read
-jobs:
-  scan:
-    if: github.event.deployment_status.state == 'success'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.deployment.sha }}
-          fetch-depth: 2
-      - uses: Unmake-io/pagewise-action@main
-        with:
-          site-url: https://your-domain.com
-```
+| Setting | Where | What |
+|---|---|---|
+| `PAGEWISE_SITE_URL` | repository variable | Production URL, for example `https://acme.com` |
+| `PAGEWISE_PREVIEW_URL` | repository variable | Preview URL template for reviews, for example `https://acme-git-{branch}-acmeteam.vercel.app` |
+| `VERCEL_AUTOMATION_BYPASS_SECRET` | secret | Only if previews are protected (Vercel › Settings › Deployment Protection › Protection Bypass for Automation) |
+| `PAGEWISE_API_URL`, `PAGEWISE_TOKEN` | variable, secret | Optional: send production scans to the Pagewise app |
 
-The report (`data.json`, captures) is kept as the `pagewise-report` workflow artifact, with a summary on the run page.
+The report (`data.json`, `DESIGN.md`, snapshots, `review.md` for previews) is kept as the `pagewise-report` artifact.
