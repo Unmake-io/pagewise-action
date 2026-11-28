@@ -28,7 +28,7 @@ inputs:
     required: false
     default: ''
   github-token:
-    description: Token used to comment the review on the pull request (needs "pull-requests: write" in the workflow).
+    description: Token used to comment the review on the pull request (needs pull-requests write permission in the workflow).
     required: false
     default: ${{ github.token }}
   vercel-bypass-secret:
