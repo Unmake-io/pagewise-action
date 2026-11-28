@@ -1,5 +1,5 @@
-# Pagewise: scans the site after each successful deployment on Vercel.
-#  - Production (default branch): full inventory and audit, stored in Pagewise, DESIGN.md refreshed.
+# Calque: scans the site after each successful deployment on Vercel.
+#  - Production (default branch): full inventory and audit, stored in Calque, DESIGN.md refreshed.
 #  - Preview (any other branch): compared with production, the review goes to the job summary and, when the
 #    commit belongs to an open pull request, to one comment on it that is kept up to date.
 # It checks out the repo to read its routes and loads the deployed pages. It never changes code or content.
@@ -9,7 +9,7 @@
 #  - status: the commit status Vercel writes on every commit ("Commit Status", on by default). It does not carry the
 #    preview URL, hence preview-url below.
 # When both arrive for the same commit, the concurrency group keeps a single scan.
-name: Pagewise
+name: Calque
 
 on:
   deployment_status:
@@ -31,7 +31,7 @@ jobs:
       (github.event_name == 'deployment_status' && github.event.deployment_status.state == 'success') ||
       (github.event_name == 'status' && github.event.state == 'success' && startsWith(github.event.context, 'Vercel') && !contains(github.event.description, 'Canceled'))
     concurrency:
-      group: pagewise-${{ github.event.deployment.sha || github.event.sha || github.sha }}
+      group: calque-${{ github.event.deployment.sha || github.event.sha || github.sha }}
       cancel-in-progress: true
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -40,11 +40,15 @@ jobs:
         with:
           ref: ${{ github.event.deployment.sha || github.event.sha || github.sha }}
           fetch-depth: 2
-      - uses: Unmake-io/pagewise-action@main
+      - uses: Unmake-io/calque-action@main
         with:
-          site-url: ${{ vars.PAGEWISE_SITE_URL }}
-          preview-url: ${{ vars.PAGEWISE_PREVIEW_URL }} # e.g. https://myapp-git-{branch}-myteam.vercel.app
+          site-url: ${{ vars.CALQUE_SITE_URL }}
+          preview-url: ${{ vars.CALQUE_PREVIEW_URL }} # e.g. https://myapp-git-{branch}-myteam.vercel.app
           mode: ${{ inputs.mode || 'auto' }}
           vercel-bypass-secret: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
-          api-url: ${{ vars.PAGEWISE_API_URL }}
-          token: ${{ secrets.PAGEWISE_TOKEN }}
+          api-url: ${{ vars.CALQUE_API_URL }}
+          # Signed-in pages (optional, previews only): a test account on your preview or staging.
+          # login-url: /login
+          # test-email: ${{ secrets.CALQUE_TEST_EMAIL }}
+          # test-password: ${{ secrets.CALQUE_TEST_PASSWORD }}
+          token: ${{ secrets.CALQUE_TOKEN }}

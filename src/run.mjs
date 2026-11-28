@@ -1,11 +1,11 @@
-// Pagewise Action entry point.
+// Calque Action entry point.
 // Decides what to scan (everything, or only the routes a commit touched), runs the scanner and the analysis,
-// then sends the report to Pagewise when an API is configured. Pagewise never changes the scanned repo.
+// then sends the report to Calque when an API is configured. Calque never changes the scanned repo.
 //
 // env (set by action.yml):
 //   PAGEWISE_SITE_URL   deployed site to scan (required)
 //   PAGEWISE_REPO_DIR   checkout of the repo (default: GITHUB_WORKSPACE)
-//   PAGEWISE_OUT        report folder (default: ./pagewise-report)
+//   PAGEWISE_OUT        report folder (default: ./calque-report)
 //   PAGEWISE_MODE       "auto" (incremental when safe), "full" or "incremental"
 //   PAGEWISE_BASE_SHA   commit to diff against (default: HEAD~1)
 //   PAGEWISE_API_URL, PAGEWISE_TOKEN   optional upload target
@@ -18,6 +18,8 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { readRoutes } from './routes.mjs';
 
+// CALQUE_* settings are the documented names; the PAGEWISE_* ones used inside keep older workflows working.
+for (const [k, v] of Object.entries(process.env)) if (k.startsWith('CALQUE_') && !process.env['PAGEWISE_' + k.slice(7)]) process.env['PAGEWISE_' + k.slice(7)] = v;
 const here = path.dirname(fileURLToPath(import.meta.url));
 const prodSite = (process.env.PAGEWISE_SITE_URL || '').replace(/\/$/, '');
 const event = (() => { try { return JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8')); } catch { return {}; } })();
@@ -41,7 +43,7 @@ function previewUrl() {
   const t = process.env.PAGEWISE_PREVIEW_URL || '';
   return t.includes('{branch}') ? (branch ? t.replace('{branch}', slug(branch)) : '') : t;
 }
-// With Vercel connected in Pagewise, the preview's URL and its protection bypass come from there: nothing to set up.
+// With Vercel connected in Calque, the preview's URL and its protection bypass come from there: nothing to set up.
 let ctx = null;
 if (kind === 'review' && process.env.PAGEWISE_API_URL && process.env.PAGEWISE_TOKEN) {
   try {
@@ -52,11 +54,11 @@ if (kind === 'review' && process.env.PAGEWISE_API_URL && process.env.PAGEWISE_TO
   if (ctx?.bypass) { console.log('::add-mask::' + ctx.bypass); if (!process.env.VERCEL_BYPASS_SECRET) process.env.VERCEL_BYPASS_SECRET = ctx.bypass; }
 }
 const site = (kind === 'review' ? ((evName === 'deployment_status' ? previewUrl() : '') || ctx?.previewUrl || previewUrl() || '') : prodSite).replace(/\/$/, '');
-if (kind === 'review' && !site) { console.log('Pagewise: preview deployment, but no preview URL to scan. Connect Vercel in Pagewise, or set the preview-url input (for example https://myapp-git-{branch}-myteam.vercel.app). Skipping.'); process.exit(0); }
+if (kind === 'review' && !site) { console.log('Calque: preview deployment, but no preview URL to scan. Connect Vercel in Calque, or set the preview-url input (for example https://myapp-git-{branch}-myteam.vercel.app). Skipping.'); process.exit(0); }
 const repo = path.resolve(process.env.PAGEWISE_REPO_DIR || process.env.GITHUB_WORKSPACE || '.');
-const out = path.resolve(process.env.PAGEWISE_OUT || 'pagewise-report');
+const out = path.resolve(process.env.PAGEWISE_OUT || 'calque-report');
 const mode = process.env.PAGEWISE_MODE || 'auto';
-if (!site) { console.error('Pagewise: no site URL to scan.'); process.exit(1); }
+if (!site) { console.error('Calque: no site URL to scan.'); process.exit(1); }
 
 // Which routes did this commit touch? A page file only affects its own route; anything shared
 // (components, styles, layouts, lib, config) can affect every page, so it means a full scan.
@@ -88,11 +90,11 @@ function changedRoutes() {
 let only = null;
 if (mode !== 'full') {
   const c = changedRoutes();
-  if (c && c.size === 0 && mode === 'auto') { console.log(kind === 'review' ? 'Pagewise: this branch changes nothing on the site, skipping the review.' : 'Pagewise: nothing on the site changed in this commit, skipping.'); process.exit(0); }
+  if (c && c.size === 0 && mode === 'auto') { console.log(kind === 'review' ? 'Calque: this branch changes nothing on the site, skipping the review.' : 'Calque: nothing on the site changed in this commit, skipping.'); process.exit(0); }
   if (c && c.size) only = c;
 }
-console.log(kind === 'review' ? `Pagewise: review of ${site} against ${prodSite}` : `Pagewise: production scan of ${site}`);
-console.log(only ? `Pagewise: incremental scan of ${only.size} route(s): ${[...only].join(', ')}` : 'Pagewise: full scan');
+console.log(kind === 'review' ? `Calque: review of ${site} against ${prodSite}` : `Calque: production scan of ${site}`);
+console.log(only ? `Calque: incremental scan of ${only.size} route(s): ${[...only].join(', ')}` : 'Calque: full scan');
 
 fs.mkdirSync(out, { recursive: true });
 if (!process.env.PAGEWISE_ENVIRONMENT) process.env.PAGEWISE_ENVIRONMENT = kind === 'review' ? 'Preview' : 'Production';
@@ -103,7 +105,7 @@ execFileSync(process.execPath, [path.join(here, 'analyze.mjs'), repo, out], { st
 const data = JSON.parse(fs.readFileSync(path.join(out, 'data.json'), 'utf8'));
 const meta = { repository: process.env.GITHUB_REPOSITORY, sha: process.env.GITHUB_SHA, environment: process.env.PAGEWISE_ENVIRONMENT || null, site, partial: !!only, routes: only ? [...only] : null };
 fs.writeFileSync(path.join(out, 'meta.json'), JSON.stringify(meta, null, 1));
-const summary = `### Pagewise\n\n${data.stats.scanned} pages scanned on ${site}${only ? ` (incremental: ${[...only].join(', ')})` : ''}\n\n${data.issues.length} issues: ${Object.entries(data.issues.reduce((m, i) => ((m[i.kind] = (m[i.kind] || 0) + 1), m), {})).map(([k, v]) => `${v} ${k}`).join(' · ')}\n`;
+const summary = `### Calque\n\n${data.stats.scanned} pages scanned on ${site}${only ? ` (incremental: ${[...only].join(', ')})` : ''}\n\n${data.issues.length} issues: ${Object.entries(data.issues.reduce((m, i) => ((m[i.kind] = (m[i.kind] || 0) + 1), m), {})).map(([k, v]) => `${v} ${k}`).join(' · ')}\n`;
 if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, summary);
 console.log(summary);
 
@@ -111,26 +113,36 @@ console.log(summary);
 if (kind === 'review') {
   const { review } = await import('./review.mjs');
   await review({ data, site, prodSite, only, repo, out, event });
+  // Signed-in pages exist only on previews: they are kept in Calque as their own pages, apart from production's.
+  const signed = Object.entries(data.pages).filter(([, p]) => p.signedIn);
+  if (signed.length && process.env.PAGEWISE_API_URL && process.env.PAGEWISE_TOKEN) {
+    const paths = new Set(signed.map(([k]) => k));
+    const sub = { ...data, pages: Object.fromEntries(signed), issues: data.issues.filter((i) => i.pages.some((p) => paths.has(p))).map((i) => ({ ...i, pages: i.pages.filter((p) => paths.has(p)) })) };
+    await upload(sub, { ...meta, partial: true, routes: [...new Set(signed.map(([, p]) => p.route))], environment: 'Preview (signed in)' }, paths);
+  }
   process.exit(0);
 }
 
-// Upload when a Pagewise API is configured; otherwise the workflow keeps the report as an artifact.
-if (process.env.PAGEWISE_API_URL && process.env.PAGEWISE_TOKEN) {
+const API_SET = process.env.PAGEWISE_API_URL && process.env.PAGEWISE_TOKEN;
+if (API_SET && !(await upload(data, meta, only))) process.exit(1);
+
+// Sends a scan to Calque: report, snapshots, block hashes, and the pages that changed since the previous scan.
+async function upload(data, meta, only) {
   const api = process.env.PAGEWISE_API_URL.replace(/\/$/, '');
   const auth = { authorization: 'Bearer ' + process.env.PAGEWISE_TOKEN };
   // What production looked like before this deployment: used to record which pages changed.
   const before = await fetch(api + '/api/state', { headers: auth }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
   const res = await fetch(api + '/api/scans', { method: 'POST', headers: { 'content-type': 'application/json', ...auth }, body: JSON.stringify({ meta, data }) });
-  if (!res.ok) { console.error('Pagewise: upload failed with status', res.status, await res.text()); process.exit(1); }
+  if (!res.ok) { console.error('Calque: upload failed with status', res.status, await res.text()); return false; }
   const { scanId, uploads, css } = await res.json();
-  console.log('Pagewise: report stored (scan ' + scanId + '). Uploading snapshots…');
-  // Snapshots and stylesheets go straight to storage with one-time tokens; Pagewise only records where they landed.
+  console.log('Calque: report stored (scan ' + scanId + '). Uploading snapshots…');
+  // Snapshots and stylesheets go straight to storage with one-time tokens; Calque only records where they landed.
   const { put } = await import('@vercel/blob');
   const pool = async (items, fn) => { let i = 0; await Promise.all(Array.from({ length: 8 }, async () => { while (i < items.length) await fn(items[i++]); })); };
   const cssUrl = {};
   await pool(Object.entries(css || {}), async ([hash, u]) => {
     try { cssUrl[hash] = (await put(u.pathname, fs.readFileSync(path.join(out, 'css', hash + '.css')), { access: 'public', token: u.clientToken, contentType: 'text/css', addRandomSuffix: false, allowOverwrite: true })).url; }
-    catch (e) { console.warn('Pagewise: stylesheet upload failed', hash, String(e.message || e)); }
+    catch (e) { console.warn('Calque: stylesheet upload failed', hash, String(e.message || e)); }
   });
   const captures = {};
   await pool(Object.entries(uploads || {}), async ([pagePath, u]) => {
@@ -147,7 +159,7 @@ if (process.env.PAGEWISE_API_URL && process.env.PAGEWISE_TOKEN) {
       if (u.blocks && fs.existsSync(bf)) c.blocks = (await put(u.blocks.pathname, fs.readFileSync(bf, 'utf8'), { access: 'public', token: u.blocks.clientToken, contentType: 'application/json', addRandomSuffix: true })).url;
       const img = path.join(out, 'thumbs', id + '.jpg');
       if (u.image && fs.existsSync(img)) c.image = (await put(u.image.pathname, fs.readFileSync(img), { access: 'public', token: u.image.clientToken, contentType: 'image/jpeg', addRandomSuffix: true })).url;
-    } catch (e) { console.warn('Pagewise: upload failed for', pagePath, String(e.message || e)); }
+    } catch (e) { console.warn('Calque: upload failed for', pagePath, String(e.message || e)); }
     if (c.html || c.image) captures[pagePath] = c;
   });
   // Pages that changed since the previous scan, with the parts that changed (before and after snapshots).
@@ -165,9 +177,10 @@ if (process.env.PAGEWISE_API_URL && process.env.PAGEWISE_TOKEN) {
       const d = diffBlocks(old, now);
       if (d) changes.push({ path: pagePath, kind: 'changed', changes: d, before: prev.capture, after: JSON.stringify(cur) });
     });
-    if (!only) for (const [pagePath, prev] of Object.entries(before.pages)) if (!data.pages[pagePath] && prev.capture) changes.push({ path: pagePath, kind: 'removed', before: prev.capture, after: null });
+    if (!only) for (const [pagePath, prev] of Object.entries(before.pages)) if (!data.pages[pagePath] && prev.capture && !prev.signedIn) changes.push({ path: pagePath, kind: 'removed', before: prev.capture, after: null });
   }
   const c = await fetch(api + '/api/scans/' + scanId + '/captures', { method: 'POST', headers: { 'content-type': 'application/json', ...auth }, body: JSON.stringify({ captures, changes }) });
-  if (changes.length) console.log(`Pagewise: ${changes.length} page(s) changed since the previous scan: ${changes.slice(0, 8).map((x) => x.path).join(', ')}${changes.length > 8 ? '…' : ''}`);
-  console.log('Pagewise: ' + Object.keys(captures).length + ' page snapshots saved' + (c.ok ? '.' : ' (recording them failed: ' + c.status + ').'));
+  if (changes.length) console.log(`Calque: ${changes.length} page(s) changed since the previous scan: ${changes.slice(0, 8).map((x) => x.path).join(', ')}${changes.length > 8 ? '…' : ''}`);
+  console.log('Calque: ' + Object.keys(captures).length + ' page snapshots saved' + (c.ok ? '.' : ' (recording them failed: ' + c.status + ').'));
+  return true;
 }

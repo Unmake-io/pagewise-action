@@ -1,4 +1,4 @@
-# Pagewise Action
+# Calque Action
 
 Scans a deployed Next.js site after each Vercel deployment: every page from the repo's routes and the sitemap, an HTML
 snapshot of each, and deterministic checks, no AI:
@@ -19,18 +19,22 @@ issues, issues fixed) to the job summary and to one comment on the pull
 request, kept up to date.
 
 Read-only on your code: it checks out the repo to read its routes and loads your pages. Its only write is the review
-comment, and only if the workflow grants `pull-requests: write`. It identifies itself as `PagewiseBot` and never clicks
+comment, and only if the workflow grants `pull-requests: write`. It identifies itself as `CalqueBot` and never clicks
 consent banners or submits forms.
 
 ## Usage
 
-Add `.github/workflows/pagewise.yml` from `example-workflow.yml`, then set:
+Add `.github/workflows/calque.yml` from `example-workflow.yml`, then set:
 
 | Setting | Where | What |
 |---|---|---|
-| `PAGEWISE_SITE_URL` | repository variable | Production URL, for example `https://acme.com` |
-| `PAGEWISE_PREVIEW_URL` | repository variable | Not needed when Vercel is connected in Pagewise. Otherwise the preview URL template, for example `https://acme-git-{branch}-acmeteam.vercel.app` |
-| `VERCEL_AUTOMATION_BYPASS_SECRET` | secret | Not needed when Vercel is connected in Pagewise. Otherwise, only if previews are protected (Vercel › Settings › Deployment Protection › Protection Bypass for Automation) |
-| `PAGEWISE_API_URL`, `PAGEWISE_TOKEN` | variable, secret | Optional: send production scans to the Pagewise app |
+| `CALQUE_SITE_URL` | repository variable | Production URL, for example `https://acme.com` |
+| `CALQUE_PREVIEW_URL` | repository variable | Not needed when Vercel is connected in Calque. Otherwise the preview URL template, for example `https://acme-git-{branch}-acmeteam.vercel.app` |
+| `VERCEL_AUTOMATION_BYPASS_SECRET` | secret | Not needed when Vercel is connected in Calque. Otherwise, only if previews are protected (Vercel › Settings › Deployment Protection › Protection Bypass for Automation) |
+| `CALQUE_API_URL`, `CALQUE_TOKEN` | variable, secret | Optional: send production scans to the Calque app |
 
-The report (`data.json`, `DESIGN.md`, snapshots, `review.md` for previews) is kept as the `pagewise-report` artifact.
+**Signed-in pages** (optional): on previews and staging, give Calque a test account (`login-url`, `test-email`,
+`test-password` as secrets) and it signs in, finds one or two pages per private route and scans them too. Never on
+production.
+
+The report (`data.json`, `DESIGN.md`, snapshots, `review.md` for previews) is kept as the `calque-report` artifact.

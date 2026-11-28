@@ -6,7 +6,8 @@ import path from 'node:path';
 import { readRoutes } from './routes.mjs';
 import { diffBlocks, blocksOf } from './changes.mjs';
 
-const MARK = '<!-- pagewise-review -->';
+const MARK = '<!-- calque-review -->';
+const OLD_MARK = '<!-- pagewise-review -->'; // comments written before the rename
 const SEV = { high: 'High', medium: 'Medium', low: 'Low' };
 const cut = (s, n = 70) => (s && s.length > n ? s.slice(0, n - 1) + '…' : s || '–');
 const cell = (s) => String(s ?? '–').replace(/\|/g, '\\|').replace(/\n/g, ' ');
@@ -24,15 +25,15 @@ export async function review({ data, site, prodSite, only, repo, out, event }) {
   const base = await baseline();
   const scanned = Object.keys(data.pages);
   const blocked = Object.values(data.pages).filter((p) => p.status === 401 || p.status === 403).length;
-  let md = `${MARK}\n### Pagewise review\n\n`;
+  let md = `${MARK}\n### Calque review\n\n`;
 
   if (blocked && blocked >= scanned.length / 2) {
-    md += `The preview at ${site} asks for a sign-in, so Pagewise could not read it. Connect Vercel in Pagewise (one click, it creates the access for you), or add the project's Vercel "Protection Bypass for Automation" secret as \`vercel-bypass-secret\`.\n`;
+    md += `The preview at ${site} asks for a sign-in, so Calque could not read it. Connect Vercel in Calque (one click, it creates the access for you), or add the project's Vercel "Protection Bypass for Automation" secret as \`vercel-bypass-secret\`.\n`;
     return publish(md, event, out);
   }
 
   md += `Preview ${site} compared with production ${prodSite}${base?.scannedAt ? ` (scanned ${base.scannedAt.slice(0, 16).replace('T', ' ')} UTC)` : ''}. ${scanned.length} page(s) checked${only ? ` (${[...only].join(', ')})` : ''}.\n\n`;
-  if (!base) md += `> No production baseline (Pagewise API not configured or no scan yet): only the issues found on the preview are listed.\n\n`;
+  if (!base) md += `> No production baseline (Calque API not configured or no scan yet): only the issues found on the preview are listed.\n\n`;
 
   // Pages: routes in this branch's code against the routes production had.
   if (base) {
@@ -61,7 +62,7 @@ export async function review({ data, site, prodSite, only, repo, out, event }) {
     if (rows.length) md += `<details><summary><b>Changed settings</b> (${rows.length})</summary>\n\n| Page | Field | Production | This branch |\n|---|---|---|---|\n${rows.slice(0, 40).join('\n')}\n\n</details>\n\n`;
   }
 
-  // Pages this branch changes: compared block by block with production, uploaded so Pagewise can show them side by side.
+  // Pages this branch changes: compared block by block with production, uploaded so Calque can show them side by side.
   const impacted = [];
   if (base?.pages) {
     const pool = async (items, fn) => { let i = 0; await Promise.all(Array.from({ length: 8 }, async () => { while (i < items.length) await fn(items[i++]); })); };
@@ -102,7 +103,7 @@ export async function review({ data, site, prodSite, only, repo, out, event }) {
     md += `**${fresh.length} new issue(s)**${ui.length ? `, including ${ui.length} off the design system` : ''}\n\n${fresh.slice(0, 25).map(line).join('\n')}${fresh.length > 25 ? `\n- and ${fresh.length - 25} more in the report` : ''}\n\n`;
   }
   if (fixed.length) md += `<details><summary><b>${fixed.length} production issue(s) gone on this branch</b></summary>\n\n${fixed.slice(0, 25).map((i) => `- ${i.kind} · ${i.title}`).join('\n')}\n\n</details>\n\n`;
-  md += `<sub>Read-only check by [Pagewise](https://github.com/Unmake-io/pagewise-action): it reads the code and the preview, never changes them. Full report: the run's \`pagewise-report\` artifact.</sub>\n`;
+  md += `<sub>Read-only check by [Calque](https://github.com/Unmake-io/calque-action): it reads the code and the preview, never changes them. Full report: the run's \`calque-report\` artifact.</sub>\n`;
   fs.writeFileSync(path.join(out, 'review.json'), JSON.stringify({ site, prodSite, fresh, fixed: fixed.map((i) => i.fingerprint) }, null, 1));
   return publish(md, event, out);
 }
@@ -118,16 +119,16 @@ async function publish(md, event, out) {
   let prs = [];
   if (event.pull_request) prs = [event.pull_request];
   else { const r = await gh(`/commits/${sha}/pulls`); if (r.ok) prs = (await r.json()).filter((p) => p.state === 'open'); }
-  if (!prs.length) { console.log('Pagewise: no open pull request for this commit, review kept in the job summary.'); return; }
+  if (!prs.length) { console.log('Calque: no open pull request for this commit, review kept in the job summary.'); return; }
   for (const pr of prs.slice(0, 3)) {
     const list = await gh(`/issues/${pr.number}/comments?per_page=100`);
-    const mine = list.ok ? (await list.json()).find((c) => c.body?.includes(MARK)) : null;
+    const mine = list.ok ? (await list.json()).find((c) => (c.body?.includes(MARK) || c.body?.includes(OLD_MARK))) : null;
     const r = mine ? await gh(`/issues/comments/${mine.id}`, { method: 'PATCH', body: JSON.stringify({ body: md }) }) : await gh(`/issues/${pr.number}/comments`, { method: 'POST', body: JSON.stringify({ body: md }) });
-    console.log(r.ok ? `Pagewise: review ${mine ? 'updated' : 'posted'} on #${pr.number}.` : `Pagewise: could not comment on #${pr.number} (${r.status}). Give the workflow "pull-requests: write" to get the review on the pull request.`);
+    console.log(r.ok ? `Calque: review ${mine ? 'updated' : 'posted'} on #${pr.number}.` : `Calque: could not comment on #${pr.number} (${r.status}). Give the workflow "pull-requests: write" to get the review on the pull request.`);
   }
 }
 
-// Uploads the preview snapshots of the impacted pages and records the review; returns the link to it in Pagewise.
+// Uploads the preview snapshots of the impacted pages and records the review; returns the link to it in Calque.
 async function uploadReview(impacted, { data, site, out, event, base }) {
   const api = (process.env.PAGEWISE_API_URL || '').replace(/\/$/, '');
   if (!api || !process.env.PAGEWISE_TOKEN) return null;
@@ -148,5 +149,5 @@ async function uploadReview(impacted, { data, site, out, event, base }) {
     } catch {} } }));
     await fetch(api + '/api/reviews/' + reviewId + '/pages', { method: 'POST', headers: { 'content-type': 'application/json', ...auth }, body: JSON.stringify({ pages: impacted }) });
     return `${api}/viewer.html?p=${projectId}&review=${reviewId}`;
-  } catch (e) { console.warn('Pagewise: could not upload the review snapshots', String(e.message || e)); return null; }
+  } catch (e) { console.warn('Calque: could not upload the review snapshots', String(e.message || e)); return null; }
 }

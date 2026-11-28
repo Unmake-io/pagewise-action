@@ -5,7 +5,10 @@ import path from 'node:path';
 const PAGE_FILES = ['page.tsx', 'page.ts', 'page.jsx', 'page.js', 'page.mdx'];
 
 // Routes that are part of the product or private flows, not the public site.
-const PRIVATE_PREFIXES = ['/app', '/ops', '/oauth', '/login', '/auth', '/claim', '/invite', '/preview', '/cookie-policy', '/c'];
+// Routes behind sign-in (or that should never be audited as public pages). Common names by default; a project adds its
+// own with the private-routes input (PAGEWISE_PRIVATE, comma separated).
+const PRIVATE_PREFIXES = ['/app', '/dashboard', '/account', '/settings', '/admin', '/login', '/signin', '/sign-in', '/signup', '/sign-up', '/register', '/auth', '/oauth', '/onboarding', '/invite', '/preview',
+  ...(process.env.PAGEWISE_PRIVATE || '').split(',').map((x) => x.trim().replace(/\/$/, '')).filter((x) => x.startsWith('/'))];
 
 export function readRoutes(repo) {
   const appDir = path.join(repo, 'app');

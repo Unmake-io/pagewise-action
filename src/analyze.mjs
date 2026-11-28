@@ -1,4 +1,4 @@
-// Turns raw scan output into Pagewise data: page tree, page settings, issues (deterministic rules only).
+// Turns raw scan output into Calque data: page tree, page settings, issues (deterministic rules only).
 // usage: node analyze.mjs <repoDir> <outDir>
 import fs from 'node:fs';
 import path from 'node:path';
@@ -11,7 +11,7 @@ const pages = raw.pages.filter((p) => !p.error);
 const REVIEW = !!raw.review;
 const prodHost = (() => { try { return new URL(process.env.PAGEWISE_PRODUCTION_URL || raw.origin).host; } catch { return ''; } })();
 const isProd = !REVIEW && /^prod/i.test(process.env.PAGEWISE_ENVIRONMENT || 'production');
-const routeInfo = new Map(raw.routes.map((r) => [r.route, r]));
+const routeInfo = new Map([...(raw.privateRoutes || []).map((r) => [r.route, r]), ...raw.routes.map((r) => [r.route, r])]);
 
 // ---------- source hints (grep, no AI) ----------
 const grepCache = new Map();
@@ -59,11 +59,12 @@ const linkHints = (target) => grep(`href=[{"'\`]*${target.replace(/[.*+?^${}()|[
 // SEO + structure, per page
 const byTitle = {}, byDesc = {};
 for (const p of pages) {
-  if (p.redirected) continue;
+  if (p.redirected || p.signedIn) continue;
   if (p.title) (byTitle[p.title] ||= []).push(p.path);
   if (p.description) (byDesc[p.description] ||= []).push(p.path);
 }
 for (const p of pages) {
+  if (p.signedIn) continue; // product pages: no SEO, sitemap or sharing rules, only accessibility, design and performance
   const file = routeInfo.get(p.route)?.file;
   if (p.redirected) {
     add({ kind: 'Structure', severity: 'medium', title: `Route ${p.path} redirects to ${p.finalPath}`, detail: `${file} exists but renders nothing: it only redirects. If that is intended, a redirect in next.config or vercel.json is clearer; otherwise the page is dead.`, pages: [p.path], file, expected: 'Redirect declared in config, or the file removed' });
@@ -85,7 +86,7 @@ if (!raw.partial) for (const [d, ps] of Object.entries(byDesc)) if (ps.length > 
 // ---------- Indexing: what search engines are told, and whether it holds ----------
 const site = raw.site || {};
 const checked = site.checked || {};
-const live0 = pages.filter((p) => !p.redirected);
+const live0 = pages.filter((p) => !p.redirected && !p.signedIn);
 const isNoindex = (p) => /noindex/i.test(p.robots || '') || (!REVIEW && /noindex/i.test(p.xRobots || ''));
 if (site.robotsBlocksAll && !REVIEW) add({ kind: 'Indexing', severity: 'high', title: 'robots.txt blocks every search engine', detail: '"User-agent: *" is followed by "Disallow: /": no page of the site can be crawled.', pages: ['/'], file: robotsFile, expected: 'Disallow only private paths (/app, /api…), or nothing', rule: 'robots-blocks-all' });
 const hidden = live0.filter(isNoindex);
@@ -169,7 +170,7 @@ for (const p of live0) for (const u of p.perf?.insecure || []) { if (!insecure.h
 if (insecure.size) add({ kind: 'Security', severity: 'high', title: `Insecure http:// resources on ${pl(new Set([...insecure.values()].flat()).size, 'page')}`, detail: [...insecure.keys()].slice(0, 4).join(' · ') + '. Browsers block or flag them (mixed content).', pages: [...new Set([...insecure.values()].flat())], hints: fileHint([...insecure.keys()][0]), expected: 'https:// for every image, script, style and frame', rule: 'mixed-content' });
 for (const f of S.exposed || []) add({ kind: 'Security', severity: 'high', title: `${f} is publicly readable`, detail: f.startsWith('/.env') ? 'It holds environment variables, often API keys and database passwords. Rotate every secret it contains.' : f.startsWith('/.git') ? 'The git repository can be downloaded, with its whole history.' : 'This file should never be served.', pages: ['/'], expected: `${f} answers 404: remove it from public/ or block it`, rule: 'exposed-file', selector: f });
 for (const a of S.adminLogin || []) add({ kind: 'Security', severity: 'low', title: `Admin login page reachable at ${a}`, detail: 'A public sign-in form on a predictable path draws password-guessing bots.', pages: ['/'], expected: 'Admin behind SSO or an allowlist, or on an unlisted path with rate limiting', rule: 'admin-path', selector: a });
-if (S.cors && S.cors.allowOrigin === 'https://pagewise-cors-check.example' && /true/i.test(S.cors.credentials || '')) add({ kind: 'Security', severity: 'high', title: 'CORS trusts any website, with credentials', detail: 'The site echoes back any Origin and allows credentials: another site can read signed-in visitors’ responses.', pages: ['/'], hints: secHint(/Access-Control-Allow-Origin|allowOrigin|cors/i), expected: 'Access-Control-Allow-Origin limited to your own domains', rule: 'cors' });
+if (S.cors && S.cors.allowOrigin === 'https://calque-cors-check.example' && /true/i.test(S.cors.credentials || '')) add({ kind: 'Security', severity: 'high', title: 'CORS trusts any website, with credentials', detail: 'The site echoes back any Origin and allows credentials: another site can read signed-in visitors’ responses.', pages: ['/'], hints: secHint(/Access-Control-Allow-Origin|allowOrigin|cors/i), expected: 'Access-Control-Allow-Origin limited to your own domains', rule: 'cors' });
 else if (S.cors && S.cors.allowOrigin === '*') add({ kind: 'Security', severity: 'low', title: 'Pages allow cross-origin reads from any site', detail: 'Access-Control-Allow-Origin: * on HTML pages is rarely needed.', pages: ['/'], hints: secHint(/Access-Control-Allow-Origin/i), expected: 'No CORS header on pages, or your own domains only', rule: 'cors-wildcard' });
 if ((S.sourceMaps || []).length) add({ kind: 'Security', severity: 'low', title: 'Source maps are public', detail: `${S.sourceMaps[0]}${S.sourceMaps.length > 1 ? ` and ${S.sourceMaps.length - 1} more` : ''}. Anyone can read the original source code of the front end.`, pages: ['/'], hints: secHint(/productionBrowserSourceMaps|sourcemap/i), expected: 'productionBrowserSourceMaps off, or maps uploaded to your error tracker only', rule: 'source-maps' });
 const secretsBy = new Map();
@@ -179,7 +180,7 @@ for (const [type, xs] of secretsBy) add({ kind: 'Security', severity: /test/i.te
 const TRACKERS = [[/^_ga($|_)|^_gid$|^_gat/, 'Google Analytics'], [/^_gcl_/, 'Google Ads'], [/^(IDE|test_cookie|NID|ANID)$/, 'Google advertising'], [/^_fbp$|^_fbc$|^fr$/, 'Meta'], [/^_hj/, 'Hotjar'], [/^_clck$|^_clsk$|^MUID$|^CLID$/, 'Microsoft Clarity'], [/^_uet/, 'Microsoft Ads'], [/^li_|^bcookie$|^lidc$|^UserMatchHistory$|^AnalyticsSyncHistory$/, 'LinkedIn'], [/^_ttp$|^_tt_/, 'TikTok'], [/^hubspotutk$|^__hs/, 'HubSpot'], [/^ajs_/, 'Segment'], [/^mp_.*mixpanel/, 'Mixpanel'], [/^_pk_/, 'Matomo'], [/^intercom-/, 'Intercom'], [/^_scid|^sc_at$/, 'Snapchat'], [/^_pin_unauth$/, 'Pinterest'], [/^ph_.*_posthog$/, 'PostHog'], [/^amp_/, 'Amplitude']];
 const tracked = new Map();
 for (const p of live0) for (const c of p.cookies || []) { const t = TRACKERS.find(([re]) => re.test(c.name)); if (!t) continue; if (!tracked.has(t[1])) tracked.set(t[1], { names: new Set(), pages: new Set() }); tracked.get(t[1]).names.add(c.name); tracked.get(t[1]).pages.add(p.path); }
-if (tracked.size && isProd) add({ kind: 'Security', severity: 'high', title: `Tracking cookies set before consent: ${[...tracked.keys()].join(', ')}`, detail: [...tracked].map(([k, v]) => `${k} (${[...v.names].slice(0, 3).join(', ')})`).join(' · ') + '. Pagewise never answers the cookie banner, so these were set without consent (GDPR / ePrivacy).', pages: [...new Set([...tracked.values()].flatMap((v) => [...v.pages]))], hints: grep('gtag|googletagmanager|fbq|hotjar|clarity').slice(0, 2), expected: 'Analytics and ad cookies only after the visitor accepts (consent mode, or load the tags after consent)', rule: 'cookies-before-consent' });
+if (tracked.size && isProd) add({ kind: 'Security', severity: 'high', title: `Tracking cookies set before consent: ${[...tracked.keys()].join(', ')}`, detail: [...tracked].map(([k, v]) => `${k} (${[...v.names].slice(0, 3).join(', ')})`).join(' · ') + '. Calque never answers the cookie banner, so these were set without consent (GDPR / ePrivacy).', pages: [...new Set([...tracked.values()].flatMap((v) => [...v.pages]))], hints: grep('gtag|googletagmanager|fbq|hotjar|clarity').slice(0, 2), expected: 'Analytics and ad cookies only after the visitor accepts (consent mode, or load the tags after consent)', rule: 'cookies-before-consent' });
 const firstParty = live0.flatMap((p) => (p.cookies || []).filter((c) => prodHost.endsWith(c.domain.replace(/^\./, ''))).map((c) => ({ ...c, page: p.path })));
 const weakCookies = firstParty.filter((c) => !c.secure || !c.sameSite);
 if (weakCookies.length && isProd) add({ kind: 'Security', severity: 'low', title: `Cookies without Secure or SameSite: ${[...new Set(weakCookies.map((c) => c.name))].slice(0, 4).join(', ')}`, detail: 'Cookies should only travel over HTTPS and not with requests from other sites.', pages: [...new Set(weakCookies.map((c) => c.page))], expected: 'Secure; SameSite=Lax (HttpOnly for session cookies)', rule: 'cookie-flags' });
@@ -369,7 +370,7 @@ function execLine(file, n) { try { return (fileCache[file] ||= fs.readFileSync(p
 const name = (rgb) => colourToken.get(rgb) ? `\`${colourToken.get(rgb)}\`` : 'no token';
 const md = [];
 const host = (() => { try { return new URL(raw.origin).host; } catch { return raw.origin; } })();
-md.push(`# Design rules: ${host}`, '', `Measured by Pagewise on ${pages.length} pages of ${raw.origin} (${raw.scannedAt.slice(0, 10)}). Read this before changing any page. Every value below is what the site already uses most; when a change needs something new, add a token first.`, '');
+md.push(`# Design rules: ${host}`, '', `Measured by Calque on ${pages.length} pages of ${raw.origin} (${raw.scannedAt.slice(0, 10)}). Read this before changing any page. Every value below is what the site already uses most; when a change needs something new, add a token first.`, '');
 md.push('## Rules', '');
 md.push('- Colours, radii, spacing and fonts come from the tokens below (`var(--…)`), never from a literal value.');
 if (designSystem?.variants?.length) { const v = designSystem.variants[0]; md.push(`- A primary action uses the primary button: background ${toRgb(designSystem.primary) ? hex(toRgb(designSystem.primary)) : designSystem.primary} (${name(toRgb(designSystem.primary))}), radius ${v.radius}, height ${v.height}, text ${v.size} weight ${v.weight}. Other variants below are drift unless they belong to a separate part of the site (app vs marketing).`); }
@@ -397,7 +398,7 @@ if (radii.length) md.push(`Radii in use: ${radii.slice(0, 6).map(([r]) => r).joi
 tokTable('spacing', 'Spacing tokens', 16); tokTable('shadow', 'Shadow tokens', 8);
 if (hardcoded.length) { md.push('## Hard-coded colours in the CSS', '', 'Literal colours outside token declarations. Replace them with the matching token when you touch these files.', '', '| File | Count | First one |', '|---|---|---|'); for (const [f, h] of hardcoded.slice(0, 10)) md.push(`| ${f} | ${h.n} | ${h.first} \`${h.sample}\` |`); md.push(''); }
 const drift = issues.filter((i) => ['UI consistency', 'Accessibility'].includes(i.kind)).slice(0, 12);
-if (drift.length) { md.push('## Known drift', '', 'Open Pagewise findings that break these rules today.', ''); for (const i of drift) md.push(`- ${i.title}${i.expected ? `: expected ${i.expected}` : ''}`); md.push(''); }
+if (drift.length) { md.push('## Known drift', '', 'Open Calque findings that break these rules today.', ''); for (const i of drift) md.push(`- ${i.title}${i.expected ? `: expected ${i.expected}` : ''}`); md.push(''); }
 const designRules = md.join('\n');
 fs.writeFileSync(path.join(outDir, 'DESIGN.md'), designRules);
 
@@ -422,14 +423,17 @@ for (const r of dyn) {
   tree.push({ type: 'collection', group: 'Dynamic pages', route: r.route, file: r.file, count: r.sitemapUrls.length, hasStaticParams: r.hasStaticParams, samples: samples.map((s) => ({ path: s.path, title: s.title, issues: pageIssues(s.path).length })), issues: samples.reduce((s, x) => s + pageIssues(x.path).length, 0) });
 }
 
+// Product pages scanned with the test account.
+for (const p of pages.filter((x) => x.signedIn)) tree.push({ type: 'page', group: 'Signed-in pages', route: p.route, file: routeInfo.get(p.route)?.file, path: p.path, title: p.title || p.path, issues: pageIssues(p.path).length });
+
 const out = {
   site: raw.origin, repo: process.env.GITHUB_REPOSITORY || path.basename(path.resolve(repo)), scannedAt: raw.scannedAt,
   stats: { routes: raw.routes.length + raw.privateRoutes.length, publicRoutes: raw.routes.length, privateRoutes: raw.privateRoutes.length, sitemapUrls: raw.sitemapCount, scanned: pages.length, issues: issues.length },
-  tree, privateRoutes: raw.privateRoutes,
+  tree, privateRoutes: raw.privateRoutes.map((r) => ({ ...r, scanned: pages.some((p) => p.signedIn && p.route === r.route) })), signedIn: raw.site?.signedIn || null,
   pages: Object.fromEntries(pages.map((p) => [p.path, {
     path: p.path, route: p.route, file: routeInfo.get(p.route)?.file, id: p.id, status: p.status, finalPath: p.finalPath, redirected: p.redirected,
     title: p.title, description: p.description, canonical: p.canonical, robots: p.robots, ogTitle: p.ogTitle, ogImage: p.ogImage, lang: p.lang, h1: p.h1,
-    xRobots: p.xRobots, headers: p.headers || null, cookies: (p.cookies || []).map((c) => c.name), share: p.redirected ? null : (() => { const sh = shareOf(p); return { title: sh.title, description: sh.description, image: sh.image, w: sh.info?.w || null, h: sh.info?.h || null, ok: sh.info ? sh.info.status === 200 : null, card: sh.card || null, siteName: sh.siteName || null, icon: sh.icon || null }; })(),
+    signedIn: !!p.signedIn, xRobots: p.xRobots, headers: p.headers || null, cookies: (p.cookies || []).map((c) => c.name), share: p.redirected ? null : (() => { const sh = shareOf(p); return { title: sh.title, description: sh.description, image: sh.image, w: sh.info?.w || null, h: sh.info?.h || null, ok: sh.info ? sh.info.status === 200 : null, card: sh.card || null, siteName: sh.siteName || null, icon: sh.icon || null }; })(),
     inSitemap: p.inSitemap, inbound: [...(inbound.get(p.path) || [])].length, outbound: (p.links || []).length, height: p.height,
     snapshot: !!p.snapshot, image: !!p.image, css: p.css || [], timing: p.timing,
     perf: p.perf ? { ttfb: p.perf.ttfb, lcp: p.perf.lcp, cls: p.perf.cls, requests: p.perf.requests, bytes: p.perf.bytes, thirdParty: (p.perf.thirdParty || []).length } : null,

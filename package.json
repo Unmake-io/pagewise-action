@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Pagewise scanner: page inventory, SEO, accessibility and UI consistency for deployed Next.js sites.",
+  "description": "Calque scanner: page inventory, SEO, accessibility and UI consistency for deployed Next.js sites.",
   "dependencies": {
     "@vercel/blob": "^2.9.0",
     "axe-core": "4.10.2",

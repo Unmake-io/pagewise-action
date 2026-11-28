@@ -1,4 +1,4 @@
-// Pagewise prototype scanner: repo routes x live site.
+// Calque prototype scanner: repo routes x live site.
 // usage: node scan.mjs <repoDir> <siteOrigin> <outDir>
 // env: PAGEWISE_ONLY (comma-separated routes to rescan), PAGEWISE_SAMPLES, PAGEWISE_CONCURRENCY, PAGEWISE_CHROME, VERCEL_BYPASS_SECRET
 import fs from 'node:fs';
@@ -15,7 +15,7 @@ const SAMPLES_PER_DYNAMIC = Number(process.env.PAGEWISE_SAMPLES || 4);
 const CONCURRENCY = Number(process.env.PAGEWISE_CONCURRENCY || 6);
 const MAX_CAPTURE_HEIGHT = 16000; // px: longer pages are captured down to this height
 const ONLY = process.env.PAGEWISE_ONLY ? new Set(process.env.PAGEWISE_ONLY.split(',').filter(Boolean)) : null;
-const UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131 Safari/537.36 PagewiseBot/0.1 (+https://github.com/Unmake-io/pagewise)';
+const UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131 Safari/537.36 CalqueBot/0.1 (+https://github.com/Unmake-io/calque)';
 const HEADERS = process.env.VERCEL_BYPASS_SECRET ? { 'x-vercel-protection-bypass': process.env.VERCEL_BYPASS_SECRET, 'x-vercel-set-bypass-cookie': 'true' } : {};
 const fetchOpts = { headers: { 'user-agent': UA, ...HEADERS } };
 // Review of a preview deployment: the site's own absolute URLs (sitemap, robots) point at production, so they are
@@ -62,7 +62,7 @@ for (const u of sitemap) {
 }
 
 // 3. Pick pages to scan
-const queue = [];
+const queue = []; queue.next = 0;
 for (const r of byRoute.values()) {
   if (ONLY && !ONLY.has(r.route)) continue;
   if (!r.dynamic) queue.push({ route: r.route, path: r.route, inSitemap: r.sitemapUrls.includes(r.route) });
@@ -73,17 +73,18 @@ for (const r of byRoute.values()) {
 const browser = await puppeteer.launch({ executablePath: process.env.PAGEWISE_CHROME || '/usr/bin/google-chrome', args: ['--no-sandbox', '--disable-dev-shm-usage'] });
 const results = [];
 const sheetUrls = new Set();
-let idx = 0;
-async function worker() {
-  const page = await browser.newPage();
+// Each worker takes pages from a list; signed-in pages use their own browser context holding the test account session.
+async function worker(list = queue, ctx = browser, cookies = null) {
+  const page = await ctx.newPage();
+  if (cookies) await page.setCookie(...cookies);
   await page.setUserAgent(UA);
   if (Object.keys(HEADERS).length) await page.setExtraHTTPHeaders(HEADERS);
   await page.emulateMediaFeatures([{ name: 'prefers-reduced-motion', value: 'reduce' }]);
   // Cookies: the scanner never answers a consent banner, so any cookie found here was set before consent.
   const cdp = await page.createCDPSession();
   const seenCookies = new Set();
-  while (idx < queue.length) {
-    const q = queue[idx++];
+  while (list.next < list.length) {
+    const q = list[list.next++];
     const id = q.path === '/' ? 'home' : q.path.slice(1).replace(/[^a-z0-9]+/gi, '-');
     try {
       await page.setViewport({ width: 1280, height: 800, deviceScaleFactor: 1 });
@@ -246,13 +247,75 @@ async function worker() {
   }
   await page.close();
 }
-await Promise.all(Array.from({ length: CONCURRENCY }, worker));
+await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()));
+
+// Signed-in pages (optional): with a test account the user gave, on a preview or staging only. Sign in once, follow the
+// links between private routes to find real pages (one or two per route), then scan them like the others.
+const LOGIN_URL = process.env.PAGEWISE_LOGIN_URL, EMAIL = process.env.PAGEWISE_TEST_EMAIL, PASSWORD = process.env.PAGEWISE_TEST_PASSWORD;
+const signedIn = { tried: false };
+if (LOGIN_URL && EMAIL && PASSWORD && !ONLY) {
+  signedIn.tried = true;
+  const prodHost = (() => { try { return new URL(process.env.PAGEWISE_PRODUCTION_URL || '').host; } catch { return ''; } })();
+  if (!REVIEW || new URL(origin).host === prodHost) { signedIn.error = 'Signed-in pages are only scanned on previews and staging, never on production.'; console.log('Calque: ' + signedIn.error); }
+  else {
+    const ctx = await browser.createBrowserContext();
+    const page = await ctx.newPage();
+    await page.setUserAgent(UA);
+    if (Object.keys(HEADERS).length) await page.setExtraHTTPHeaders(HEADERS);
+    try {
+      const loginAt = new URL(LOGIN_URL, origin);
+      await page.goto(origin + loginAt.pathname + loginAt.search, { waitUntil: 'networkidle2', timeout: 30000 });
+      const visible = async (sel) => page.$$eval(sel, (els) => els.findIndex((e) => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; }));
+      const EMAIL_SEL = 'input[type=email], input[name*=email i], input[autocomplete=username], input[name=username]', PASS_SEL = 'input[type=password]';
+      if ((await visible(PASS_SEL)) < 0) { // password behind a toggle ("Use a password instead")
+        const toggled = await page.evaluate(() => { const b = [...document.querySelectorAll('button, a, [role=button]')].find((e) => /password/i.test(e.textContent || '') && e.getBoundingClientRect().width > 0); if (b) { b.click(); return true; } return false; });
+        if (toggled) await new Promise((r) => setTimeout(r, 600));
+      }
+      const ei = await visible(EMAIL_SEL), pi = await visible(PASS_SEL);
+      if (ei < 0 || pi < 0) throw new Error('no email and password fields on ' + loginAt.pathname + ' (magic link or social sign-in only?)');
+      await (await page.$$(EMAIL_SEL))[ei].type(EMAIL, { delay: 10 });
+      const pass = (await page.$$(PASS_SEL))[pi];
+      await pass.type(PASSWORD, { delay: 10 });
+      const before = page.url();
+      await Promise.all([page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }).catch(() => {}), pass.press('Enter')]);
+      await new Promise((r) => setTimeout(r, 1500));
+      if ((await visible(PASS_SEL)) >= 0 && page.url() === before) throw new Error('the sign-in did not go through (wrong password, a captcha, or a second factor?)');
+      // Find pages: breadth-first over links that stay on private routes, never following sign-out or destructive links.
+      const privateRoutes = routes.filter((r) => r.isPrivate && !/^\/(login|signin|sign-in|signup|sign-up|register|auth|oauth)(\/|$)/.test(r.route));
+      const perRoute = new Map(), found = [], seen = new Set();
+      const frontier = [new URL(page.url()).pathname];
+      while (frontier.length && found.length < 40 && seen.size < 120) {
+        const p0 = frontier.shift(); if (seen.has(p0)) continue; seen.add(p0);
+        const r = matchRoute(privateRoutes, p0);
+        if (r && (perRoute.get(r.route) || 0) < 2) { perRoute.set(r.route, (perRoute.get(r.route) || 0) + 1); found.push({ route: r.route, path: p0, signedIn: true, inSitemap: false }); }
+        try {
+          if (new URL(page.url()).pathname !== p0) await page.goto(origin + p0, { waitUntil: 'networkidle2', timeout: 30000 });
+          const links = await page.$$eval('a[href]', (as) => as.map((a) => a.getAttribute('href')));
+          for (const h of links) {
+            if (!h || /^(mailto|tel|javascript):/i.test(h) || /(sign-?out|log-?out|delete|remove|destroy|unsubscribe|cancel|billing|checkout)/i.test(h)) continue;
+            let u; try { u = new URL(h, origin); } catch { continue; }
+            if (u.host !== new URL(origin).host) continue;
+            const pp = u.pathname.replace(/\/$/, '') || '/';
+            if (matchRoute(privateRoutes, pp) && !seen.has(pp)) frontier.push(pp);
+          }
+        } catch {}
+      }
+      const cookies = await page.cookies();
+      await page.close();
+      const list = found; list.next = 0;
+      signedIn.pages = found.length;
+      console.log(`Calque: signed in as the test account, ${found.length} signed-in page(s) to scan across ${perRoute.size} route(s).`);
+      await Promise.all(Array.from({ length: Math.min(3, CONCURRENCY) }, () => worker(list, ctx, cookies)));
+    } catch (e) { signedIn.error = 'Could not sign in: ' + String(e.message || e).slice(0, 200); console.log('Calque: ' + signedIn.error); }
+    await ctx.close().catch(() => {});
+  }
+}
 await browser.close();
 
 // Agents that do not run JavaScript see the raw HTML: compare its text with what the browser rendered.
 const textOf = (html) => (html.match(/<body[\s\S]*<\/body>/i)?.[0] || html).replace(/<(script|style|noscript|template)[\s\S]*?<\/\1>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/&[a-z#0-9]+;/gi, ' ').replace(/\s+/g, ' ').trim().length;
 let ri = 0;
-await Promise.all(Array.from({ length: 8 }, async () => { while (ri < results.length) { const r = results[ri++]; if (!r.agents) continue; try { const raw = await (await fetch(origin + r.path, fetchOpts)).text(); r.agents.rawText = textOf(raw); r.rawHtml = raw.slice(0, 2e6); } catch {} } }));
+await Promise.all(Array.from({ length: 8 }, async () => { while (ri < results.length) { const r = results[ri++]; if (!r.agents || r.signedIn) continue; try { const raw = await (await fetch(origin + r.path, fetchOpts)).text(); r.agents.rawText = textOf(raw); r.rawHtml = raw.slice(0, 2e6); } catch {} } }));
 const site = { robots, llmsTxt: false, aiBlocked: [] };
 try { const l = await fetch(origin + '/llms.txt', fetchOpts); site.llmsTxt = l.ok && !/<html/i.test((await l.text()).slice(0, 200)); } catch {}
 { // AI crawlers fully disallowed in robots.txt
@@ -356,7 +419,7 @@ if (!REVIEW && !ONLY) {
     try { const r = await fetch(origin + p, { ...fetchOpts, signal: AbortSignal.timeout(10000) }); if (r.status === 200 && /type=["']?password/i.test(await r.text())) security.adminLogin.push(p); } catch {}
   }));
   try {
-    const r = await fetch(origin + '/', { ...fetchOpts, headers: { ...fetchOpts.headers, origin: 'https://pagewise-cors-check.example' }, signal: AbortSignal.timeout(10000) });
+    const r = await fetch(origin + '/', { ...fetchOpts, headers: { ...fetchOpts.headers, origin: 'https://calque-cors-check.example' }, signal: AbortSignal.timeout(10000) });
     security.cors = { allowOrigin: r.headers.get('access-control-allow-origin'), credentials: r.headers.get('access-control-allow-credentials') };
   } catch {}
   // The site's own scripts: public source maps, and secrets that should only live on the server.
@@ -389,6 +452,7 @@ if (!REVIEW && !ONLY) {
 }
 for (const r of results) delete r.rawHtml;
 site.security = security;
+site.signedIn = signedIn;
 site.robotsBlocksAll = /disallow:\s*\/\s*($|\n)/i.test(robots.split(/\n(?=user-agent)/i).find((g) => /user-agent:\s*\*/i.test(g)) || '');
 site.sitemapHosts = Object.fromEntries(sitemapHosts);
 site.sitemapFound = sitemap.size > 0;

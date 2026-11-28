@@ -1,4 +1,4 @@
-name: Pagewise scan
+name: Calque scan
 description: Inventory every page of a deployed Next.js site, audit SEO, indexing, share previews, accessibility, performance and UI consistency, write DESIGN.md, and review preview deployments against production. Read-only on your code.
 branding:
   icon: layout
@@ -31,16 +31,32 @@ inputs:
     description: Token used to comment the review on the pull request (needs pull-requests write permission in the workflow).
     required: false
     default: ${{ github.token }}
+  private-routes:
+    description: Extra routes behind sign-in, comma separated (for example /workspace,/billing). /app, /dashboard, /account, /settings, /admin and the sign-in routes are already treated as private.
+    required: false
+    default: ''
+  login-url:
+    description: Sign-in page used with the test account to scan signed-in pages, on previews and staging only (for example /login).
+    required: false
+    default: ''
+  test-email:
+    description: Test account email (pass a secret). Never used on production.
+    required: false
+    default: ''
+  test-password:
+    description: Test account password (pass a secret). Never used on production.
+    required: false
+    default: ''
   vercel-bypass-secret:
     description: Vercel "Protection Bypass for Automation" secret, only needed for protected preview deployments.
     required: false
     default: ''
   api-url:
-    description: Pagewise API to send the report to. Leave empty to keep the report as a workflow artifact only.
+    description: Calque API to send the report to. Leave empty to keep the report as a workflow artifact only.
     required: false
     default: ''
   token:
-    description: Pagewise project token, used with api-url.
+    description: Calque project token, used with api-url.
     required: false
     default: ''
 runs:
@@ -59,11 +75,15 @@ runs:
         PAGEWISE_ENVIRONMENT: ${{ inputs.environment }}
         PAGEWISE_MODE: ${{ inputs.mode }}
         PAGEWISE_KIND: ${{ inputs.kind }}
+        PAGEWISE_PRIVATE: ${{ inputs.private-routes }}
+        PAGEWISE_LOGIN_URL: ${{ inputs.login-url }}
+        PAGEWISE_TEST_EMAIL: ${{ inputs.test-email }}
+        PAGEWISE_TEST_PASSWORD: ${{ inputs.test-password }}
         PAGEWISE_PREVIEW_URL: ${{ inputs.preview-url }}
         GITHUB_TOKEN: ${{ inputs.github-token }}
         PAGEWISE_SAMPLES: ${{ inputs.samples-per-dynamic-route }}
         PAGEWISE_REPO_DIR: ${{ github.workspace }}
-        PAGEWISE_OUT: ${{ runner.temp }}/pagewise-report
+        PAGEWISE_OUT: ${{ runner.temp }}/calque-report
         PAGEWISE_CHROME: /usr/bin/google-chrome
         VERCEL_BYPASS_SECRET: ${{ inputs.vercel-bypass-secret }}
         PAGEWISE_API_URL: ${{ inputs.api-url }}
@@ -73,7 +93,7 @@ runs:
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: pagewise-report
-        path: ${{ runner.temp }}/pagewise-report
+        name: calque-report
+        path: ${{ runner.temp }}/calque-report
         retention-days: 14
         if-no-files-found: ignore
