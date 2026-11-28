@@ -107,6 +107,39 @@ async function worker() {
           height: document.documentElement.scrollHeight,
         };
       }, origin);
+      // Performance and agent-readiness, read from what this load already produced (no extra page load).
+      const extra = await page.evaluate(async (orig) => {
+        const sel = (el) => { if (!el || !el.tagName) return ''; const c = [...(el.classList || [])].slice(0, 2).join('.'); return el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') + (c ? '.' + c : ''); };
+        const buffered = (type, fn) => new Promise((res) => { try { const o = new PerformanceObserver((l) => fn(l.getEntries())); o.observe({ type, buffered: true }); setTimeout(() => { o.disconnect(); res(); }, 60); } catch { res(); } });
+        let lcp = 0, lcpEl = '', cls = 0; const shifts = {};
+        await buffered('largest-contentful-paint', (es) => { for (const e of es) { lcp = e.startTime; lcpEl = sel(e.element); } });
+        await buffered('layout-shift', (es) => { for (const e of es) { if (e.hadRecentInput) continue; cls += e.value; for (const s of e.sources || []) { const k = sel(s.node); if (k) shifts[k] = (shifts[k] || 0) + e.value; } } });
+        const nav = performance.getEntriesByType('navigation')[0] || {};
+        const res = performance.getEntriesByType('resource');
+        const size = (r) => r.transferSize || r.encodedBodySize || 0;
+        const by = { script: 0, css: 0, img: 0, font: 0, other: 0 };
+        for (const r of res) { const k = r.initiatorType === 'script' ? 'script' : r.initiatorType === 'img' || /\.(png|jpe?g|webp|avif|gif|svg)(\?|$)/i.test(r.name) ? 'img' : /\.css(\?|$)/.test(r.name) || r.initiatorType === 'link' && /css/.test(r.name) ? 'css' : /\.(woff2?|ttf|otf)(\?|$)/.test(r.name) ? 'font' : 'other'; by[k] += size(r); }
+        const sizeOf = Object.fromEntries(res.map((r) => [r.name, size(r)]));
+        const images = [...document.images].filter((i) => i.currentSrc && i.getBoundingClientRect().width > 0).map((i) => ({
+          src: i.currentSrc, bytes: sizeOf[i.currentSrc] || 0, natural: i.naturalWidth, shown: Math.round(i.getBoundingClientRect().width),
+          noDims: !(i.getAttribute('width') && i.getAttribute('height')) && getComputedStyle(i).aspectRatio === 'auto', lazy: i.loading === 'lazy', sel: sel(i),
+        }));
+        const blocking = [...document.querySelectorAll('head script[src]:not([async]):not([defer]):not([type=module]):not([nomodule])')].map((s) => s.src);
+        const thirdParty = [...new Set(res.map((r) => { try { return new URL(r.name).host; } catch { return ''; } }).filter((h) => h && h !== location.host))];
+        // Clickable things agents cannot recognise: pointer cursor on an element that is not a link, button or control.
+        const fake = {};
+        for (const el of document.querySelectorAll('div, span, li, td, img, svg, p')) {
+          if (getComputedStyle(el).cursor !== 'pointer' || el.closest('a, button, [role=button], [role=link], [role=tab], [role=menuitem], label, summary, input, select, textarea')) continue;
+          if (el.parentElement && getComputedStyle(el.parentElement).cursor === 'pointer') continue;
+          if (el.getAttribute('role') || el.getAttribute('tabindex') !== null) continue;
+          const k = sel(el); fake[k] = (fake[k] || 0) + 1;
+        }
+        const ld = [...document.querySelectorAll('script[type="application/ld+json"]')].map((s) => { try { const j = JSON.parse(s.textContent); const items = Array.isArray(j) ? j : j['@graph'] || [j]; return { ok: true, types: items.map((x) => x['@type']).flat().filter(Boolean) }; } catch { return { ok: false, types: [] }; } });
+        return {
+          perf: { ttfb: Math.round(nav.responseStart || 0), dcl: Math.round(nav.domContentLoadedEventEnd || 0), lcp: Math.round(lcp), lcpEl, cls: +cls.toFixed(3), shifts, requests: res.length + 1, bytes: { html: nav.transferSize || nav.encodedBodySize || 0, ...by }, images, blocking, thirdParty },
+          agents: { fakeButtons: fake, jsonld: ld, renderedText: (document.body.innerText || '').replace(/\s+/g, ' ').trim().length },
+        };
+      }, origin);
       t.read = Date.now() - t0 - t.load;
       // Pages from the same dynamic route share their template: the accessibility audit runs on the first one only.
       // Pages from the same dynamic route share their template: the costly colour-contrast rule runs on the first
@@ -143,7 +176,7 @@ async function worker() {
         await page.screenshot(shot);
       }
       t.capture = Date.now() - t0 - t.load - t.read - t.axe; t.total = Date.now() - t0;
-      results.push({ ...q, id, status: resp?.status() ?? 0, finalPath, redirected: finalPath !== q.path, ...data, axe, timing: t, capturedHeight: Math.min(fullH, MAX_CAPTURE_HEIGHT), snapshot: true, image: snap.needsImage });
+      results.push({ ...q, id, status: resp?.status() ?? 0, finalPath, redirected: finalPath !== q.path, ...data, ...extra, axe, timing: t, capturedHeight: Math.min(fullH, MAX_CAPTURE_HEIGHT), snapshot: true, image: snap.needsImage });
       process.stdout.write('.');
     } catch (e) {
       results.push({ ...q, id, status: 0, error: String(e.message || e).slice(0, 200) });
@@ -154,6 +187,20 @@ async function worker() {
 }
 await Promise.all(Array.from({ length: CONCURRENCY }, worker));
 await browser.close();
+
+// Agents that do not run JavaScript see the raw HTML: compare its text with what the browser rendered.
+const textOf = (html) => (html.match(/<body[\s\S]*<\/body>/i)?.[0] || html).replace(/<(script|style|noscript|template)[\s\S]*?<\/\1>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/&[a-z#0-9]+;/gi, ' ').replace(/\s+/g, ' ').trim().length;
+let ri = 0;
+await Promise.all(Array.from({ length: 8 }, async () => { while (ri < results.length) { const r = results[ri++]; if (!r.agents) continue; try { const raw = await (await fetch(origin + r.path, fetchOpts)).text(); r.agents.rawText = textOf(raw); } catch {} } }));
+const site = { robots, llmsTxt: false, aiBlocked: [] };
+try { const l = await fetch(origin + '/llms.txt', fetchOpts); site.llmsTxt = l.ok && !/<html/i.test((await l.text()).slice(0, 200)); } catch {}
+{ // AI crawlers fully disallowed in robots.txt
+  const groups = robots.split(/\n(?=user-agent)/i);
+  for (const bot of ['GPTBot', 'ClaudeBot', 'Claude-User', 'PerplexityBot', 'Google-Extended', 'OAI-SearchBot', 'CCBot']) {
+    const g = groups.find((x) => new RegExp('user-agent:\\s*' + bot + '\\b', 'i').test(x)) || '';
+    if (/disallow:\s*\/\s*($|\n)/i.test(g)) site.aiBlocked.push(bot);
+  }
+}
 
 // Stylesheets: fetched once, url() made absolute, stored by content hash and linked from every snapshot.
 const { createHash } = await import('node:crypto');
@@ -178,7 +225,7 @@ for (const r of results) {
   r.css = [...new Set([...html.matchAll(/__PW_CSS__\/([0-9a-f]+)\.css/g)].map((m) => m[1]))];
 }
 
-fs.writeFileSync(path.join(outDir, 'raw.json'), JSON.stringify({ origin, partial: !!ONLY, scannedRoutes: ONLY ? [...ONLY] : null, scannedAt: new Date().toISOString(), routes: [...byRoute.values()], unmatched, sitemapCount: sitemap.size, privateRoutes: routes.filter((r) => r.isPrivate).map((r) => ({ route: r.route, file: r.file })), pages: results }, null, 1));
+fs.writeFileSync(path.join(outDir, 'raw.json'), JSON.stringify({ origin, site, partial: !!ONLY, scannedRoutes: ONLY ? [...ONLY] : null, scannedAt: new Date().toISOString(), routes: [...byRoute.values()], unmatched, sitemapCount: sitemap.size, privateRoutes: routes.filter((r) => r.isPrivate).map((r) => ({ route: r.route, file: r.file })), pages: results }, null, 1));
 const timed = results.filter((r) => r.timing).sort((a, b) => b.timing.total - a.timing.total);
 const sum = (k) => Math.round(timed.reduce((n, r) => n + (r.timing[k] || 0), 0) / 1000);
 console.log('\nscanned', results.length, 'pages; sitemap', sitemap.size, 'urls; unmatched', unmatched.length);

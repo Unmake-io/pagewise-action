@@ -131,6 +131,45 @@ if (primaryBg) {
     add({ kind: 'UI consistency', severity: 'medium', title: 'Primary button off the site’s variants', detail: `"${[...v.texts][0]}": radius ${radius}, height ${height}, text ${size}. The site’s primary buttons use radius ${near[0]}, height ${near[1]}, text ${near[2]}.`, pages: [...v.pages], expected: `Radius ${near[0]}, height ${near[1]}, text ${near[2]} (colour ${bg})`, hints: grep('min-height: ?' + parseFloat(height) + 'px').filter((x) => x.file.endsWith('.css')).slice(0, 2) });
   }
 }
+// ---------- Performance (deterministic: weights, sizes and structure; timings only past generous limits) ----------
+const live = pages.filter((p) => !p.redirected && p.perf);
+const kb = (n) => Math.round(n / 1024);
+const fileHint = (url) => { try { const name = decodeURIComponent(new URL(url).pathname.split('/').pop() || '').replace(/[-_.][0-9a-f]{8,}(?=\.)/, ''); return name.length > 3 ? grep(name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).slice(0, 1) : []; } catch { return []; } };
+const imgs = new Map();
+for (const p of live) for (const im of p.perf.images || []) { const k = im.src.split('?')[0]; if (!imgs.has(k)) imgs.set(k, { ...im, pages: new Set() }); imgs.get(k).pages.add(p.path); }
+for (const [src, im] of imgs) {
+  const name = src.split('/').pop().slice(0, 60);
+  if (im.bytes > 250 * 1024) add({ kind: 'Performance', severity: im.bytes > 800 * 1024 ? 'high' : 'medium', title: `Heavy image: ${name} (${kb(im.bytes)} KB)`, detail: `Loaded on ${im.pages.size} page(s), shown ${im.shown}px wide.`, pages: [...im.pages], selector: im.sel, hints: fileHint(src), expected: 'Under 200 KB: compressed, WebP or AVIF, sized to how it is shown', rule: 'heavy-image', src });
+  if (im.natural > 800 && im.natural > im.shown * 2.5) add({ kind: 'Performance', severity: 'low', title: `Oversized image: ${name}`, detail: `${im.natural}px wide for ${im.shown}px on screen.`, pages: [...im.pages], selector: im.sel, hints: fileHint(src), expected: `About ${im.shown * 2}px wide (srcset / sizes, or next/image with sizes)`, rule: 'oversized-image', src });
+  if (im.noDims && !im.lazy) add({ kind: 'Performance', severity: 'low', title: `Image without width and height: ${name}`, detail: 'The page shifts when it loads, which also disturbs agents clicking on the page.', pages: [...im.pages], selector: im.sel, hints: fileHint(src), expected: 'width and height attributes, or a CSS aspect-ratio', rule: 'image-dimensions', src });
+}
+const blockers = new Map();
+for (const p of live) for (const b of p.perf.blocking || []) { if (!blockers.has(b)) blockers.set(b, new Set()); blockers.get(b).add(p.path); }
+for (const [src, ps] of blockers) add({ kind: 'Performance', severity: 'medium', title: `Render-blocking script: ${src.split('/').pop().slice(0, 50)}`, detail: 'Loaded in <head> without async or defer: the page waits for it before showing anything.', pages: [...ps], hints: fileHint(src), expected: 'async or defer, or next/script with strategy="afterInteractive"', rule: 'render-blocking', src });
+const total = (p) => Object.values(p.perf.bytes).reduce((a, b) => a + b, 0);
+const heavyPages = live.filter((p) => total(p) > 2.5 * 1024 * 1024);
+if (heavyPages.length) add({ kind: 'Performance', severity: 'medium', title: `${heavyPages.length} page(s) weigh more than 2.5 MB`, detail: heavyPages.slice(0, 6).map((p) => `${p.path} ${kb(total(p))} KB`).join(' · '), pages: heavyPages.map((p) => p.path), expected: 'Under 2.5 MB per page (images, scripts and fonts included)', rule: 'page-weight' });
+const jsPages = live.filter((p) => p.perf.bytes.script > 500 * 1024);
+if (jsPages.length) add({ kind: 'Performance', severity: 'medium', title: `${jsPages.length} page(s) load more than 500 KB of JavaScript`, detail: jsPages.slice(0, 6).map((p) => `${p.path} ${kb(p.perf.bytes.script)} KB`).join(' · '), pages: jsPages.map((p) => p.path), expected: 'Under 500 KB of JavaScript: split heavy components, load them on demand', rule: 'js-weight' });
+const shiftsBy = new Map();
+for (const p of live) if (p.perf.cls > 0.1) { const top = Object.entries(p.perf.shifts || {}).sort((a, b) => b[1] - a[1])[0]?.[0] || 'page'; if (!shiftsBy.has(top)) shiftsBy.set(top, { pages: [], max: 0 }); const g = shiftsBy.get(top); g.pages.push(p.path); g.max = Math.max(g.max, p.perf.cls); }
+for (const [el, g] of shiftsBy) add({ kind: 'Performance', severity: g.max > 0.25 ? 'high' : 'medium', title: 'Layout shifts while the page loads', detail: `Cumulative layout shift up to ${g.max.toFixed(2)}, mostly caused by ${el}.`, pages: g.pages, selector: el, hints: hintsFor(el, null), expected: 'CLS under 0.1: reserve space for images, embeds and late content', rule: 'cls' });
+const slow = live.filter((p) => p.perf.lcp > 4000);
+if (slow.length) add({ kind: 'Performance', severity: 'low', title: `Main content shows late on ${slow.length} page(s)`, detail: slow.slice(0, 5).map((p) => `${p.path} ${(p.perf.lcp / 1000).toFixed(1)} s (${p.perf.lcpEl || 'element'})`).join(' · ') + '. Measured in CI, so compare between scans rather than to the second.', pages: slow.map((p) => p.path), expected: 'Largest contentful paint under 2.5 s', rule: 'lcp' });
+
+// ---------- Agents: can an AI agent read and use the site? ----------
+if (raw.site?.aiBlocked?.length) add({ kind: 'Agents', severity: 'high', title: `AI crawlers blocked in robots.txt: ${raw.site.aiBlocked.join(', ')}`, detail: 'These agents cannot read the site, so assistants will not cite or recommend it.', pages: ['/'], hints: grep('robots').filter((x) => /robots/.test(x.file)).slice(0, 1), expected: 'Allow the AI crawlers you want to be found by', rule: 'ai-blocked' });
+if (raw.site && !raw.site.llmsTxt && !raw.partial) add({ kind: 'Agents', severity: 'low', title: 'No llms.txt', detail: 'A short index of the site for language models: what it is, its key pages.', pages: ['/'], expected: '/llms.txt listing the main pages with one line each', rule: 'llms-txt' });
+const jsOnly = live.filter((p) => p.agents && p.agents.renderedText > 500 && (p.agents.rawText || 0) < p.agents.renderedText * 0.5);
+if (jsOnly.length) add({ kind: 'Agents', severity: 'high', title: `Content only visible with JavaScript on ${jsOnly.length} page(s)`, detail: jsOnly.slice(0, 5).map((p) => `${p.path}: ${Math.round(100 * (p.agents.rawText || 0) / p.agents.renderedText)}% of the text in the HTML`).join(' · ') + '. Agents and crawlers that do not run JavaScript see an almost empty page.', pages: jsOnly.map((p) => p.path), expected: 'Text rendered on the server (server components, static generation)', rule: 'js-only-content' });
+const fakes = new Map();
+for (const p of live) for (const [k, n] of Object.entries(p.agents?.fakeButtons || {})) { if (!fakes.has(k)) fakes.set(k, { pages: new Set(), n: 0 }); const g = fakes.get(k); g.pages.add(p.path); g.n += n; }
+for (const [k, g] of fakes) add({ kind: 'Agents', severity: 'medium', title: 'Clickable element that is not a button or a link', detail: `${k}: pointer cursor but no button, link or role, ${g.n} time(s). Agents and keyboard users do not see it as something to click.`, pages: [...g.pages], selector: k, hints: hintsFor(k, null), expected: '<button> or <a href>, or role="button" with tabindex and keyboard support', rule: 'fake-button' });
+const badLd = live.filter((p) => (p.agents?.jsonld || []).some((x) => !x.ok));
+if (badLd.length) add({ kind: 'Agents', severity: 'high', title: 'Invalid structured data (JSON-LD)', detail: 'The JSON-LD block does not parse, so search engines and agents ignore it.', pages: badLd.map((p) => p.path), expected: 'Valid JSON in every application/ld+json script', rule: 'jsonld-invalid' });
+const noLd = live.filter((p) => !p.route.includes('[') && !(p.agents?.jsonld || []).length);
+if (noLd.length && !raw.partial) add({ kind: 'Agents', severity: 'low', title: `No structured data on ${noLd.length} page(s)`, detail: 'Structured data tells agents what a page is (product, article, FAQ, organisation).', pages: noLd.map((p) => p.path), expected: 'A JSON-LD block describing the page (Organization, Product, Article, FAQPage…)', rule: 'jsonld-missing' });
+
 const navCount = {};
 for (const p of pages) if (!p.redirected) { const k = (p.navLinks || []).length; navCount[k] = (navCount[k] || 0) + 1; }
 
@@ -162,9 +201,11 @@ const out = {
     title: p.title, description: p.description, canonical: p.canonical, robots: p.robots, ogTitle: p.ogTitle, ogImage: p.ogImage, lang: p.lang, h1: p.h1,
     inSitemap: p.inSitemap, inbound: [...(inbound.get(p.path) || [])].length, outbound: (p.links || []).length, height: p.height,
     snapshot: !!p.snapshot, image: !!p.image, css: p.css || [], timing: p.timing,
+    perf: p.perf ? { ttfb: p.perf.ttfb, lcp: p.perf.lcp, cls: p.perf.cls, requests: p.perf.requests, bytes: p.perf.bytes, thirdParty: (p.perf.thirdParty || []).length } : null,
+    agents: p.agents ? { rawText: p.agents.rawText, renderedText: p.agents.renderedText, jsonld: (p.agents.jsonld || []).flatMap((x) => x.types) } : null,
     issues: pageIssues(p.path).map((i) => i.id),
   }])),
-  issues, designSystem, fonts, navCount,
+  issues, designSystem, fonts, navCount, agentReadiness: raw.site ? { llmsTxt: raw.site.llmsTxt, aiBlocked: raw.site.aiBlocked } : null,
 };
 fs.writeFileSync(path.join(outDir, 'data.json'), JSON.stringify(out));
 const k = {}; issues.forEach((i) => (k[i.kind] = (k[i.kind] || 0) + 1));
