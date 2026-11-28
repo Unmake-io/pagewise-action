@@ -1,10 +1,16 @@
-# Pagewise: scans the site after each successful Vercel deployment.
+# Pagewise: scans the site after each successful production deployment on Vercel.
 # Read-only: it checks out the repo to read its routes, loads the deployed pages and reports what it finds.
 # It never pushes, comments or changes anything.
+#
+# Two triggers, so it works whatever the Vercel project's Git settings are:
+#  - deployment_status: sent by Vercel when "deployment_status Events" is on (Project › Settings › Git);
+#  - status: the commit status Vercel writes on every commit ("Commit Status", on by default).
+# When both arrive for the same commit, the concurrency group keeps a single scan.
 name: Pagewise
 
 on:
   deployment_status:
+  status:
   workflow_dispatch:
     inputs:
       mode:
@@ -14,25 +20,26 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: pagewise-${{ github.event.deployment.environment || 'manual' }}
-  cancel-in-progress: true
-
 jobs:
   scan:
-    if: github.event_name == 'workflow_dispatch' || github.event.deployment_status.state == 'success'
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'deployment_status' && github.event.deployment_status.state == 'success' && github.event.deployment.environment == 'Production') ||
+      (github.event_name == 'status' && github.event.state == 'success' && startsWith(github.event.context, 'Vercel') && contains(github.event.branches.*.name, github.event.repository.default_branch))
+    concurrency:
+      group: pagewise-${{ github.event.deployment.sha || github.event.sha || github.sha }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.deployment.sha || github.sha }}
+          ref: ${{ github.event.deployment.sha || github.event.sha || github.sha }}
           fetch-depth: 2
       - uses: Unmake-io/pagewise-action@main
         with:
-          # Production is scanned on its public domain; previews on their own URL.
-          site-url: ${{ (github.event_name == 'workflow_dispatch' || github.event.deployment.environment == 'Production') && vars.PAGEWISE_SITE_URL || github.event.deployment_status.environment_url }}
-          environment: ${{ github.event.deployment.environment || 'Production' }}
+          site-url: ${{ vars.PAGEWISE_SITE_URL }}
+          environment: Production
           mode: ${{ inputs.mode || 'auto' }}
           vercel-bypass-secret: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
           api-url: ${{ vars.PAGEWISE_API_URL }}
