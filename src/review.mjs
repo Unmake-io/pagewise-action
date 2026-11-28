@@ -4,6 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { readRoutes } from './routes.mjs';
+import { diffBlocks, blocksOf } from './changes.mjs';
 
 const MARK = '<!-- pagewise-review -->';
 const SEV = { high: 'High', medium: 'Medium', low: 'Low' };
@@ -60,6 +61,30 @@ export async function review({ data, site, prodSite, only, repo, out, event }) {
     if (rows.length) md += `<details><summary><b>Changed settings</b> (${rows.length})</summary>\n\n| Page | Field | Production | This branch |\n|---|---|---|---|\n${rows.slice(0, 40).join('\n')}\n\n</details>\n\n`;
   }
 
+  // Pages this branch changes: compared block by block with production, uploaded so Pagewise can show them side by side.
+  const impacted = [];
+  if (base?.pages) {
+    const pool = async (items, fn) => { let i = 0; await Promise.all(Array.from({ length: 8 }, async () => { while (i < items.length) await fn(items[i++]); })); };
+    await pool(scanned, async (p) => {
+      const now = (() => { try { return JSON.parse(fs.readFileSync(path.join(out, 'blocks', data.pages[p].id + '.json'), 'utf8')); } catch { return null; } })();
+      const prod = base.pages[p];
+      if (!prod) { impacted.push({ path: p, kind: 'added', before: null }); return; }
+      const d = diffBlocks(await blocksOf(prod.capture), now);
+      if (d) impacted.push({ path: p, kind: 'changed', changes: d, before: prod.capture });
+    });
+    impacted.sort((a, b) => a.path.localeCompare(b.path));
+  }
+  let link = null;
+  if (impacted.length) link = await uploadReview(impacted, { data, site, out, event, base });
+  if (impacted.length) {
+    const lines = impacted.slice(0, 20).map((x) => {
+      const b = x.changes?.blocks || {}; const n = (b.changed?.length || 0) + (b.added?.length || 0) + (b.removed?.length || 0);
+      const what = x.kind === 'added' ? 'new page' : [x.changes?.text && 'text', x.changes?.structure && 'layout', x.changes?.style && 'styles'].filter(Boolean).join(', ');
+      return `| ${link ? `[\`${x.path}\`](${link}&path=${encodeURIComponent(x.path)}#changes)` : '`' + x.path + '`'} | ${what || 'changed'} | ${n || ''} |`;
+    });
+    md += `**${impacted.length === 1 ? '1 page looks' : impacted.length + ' pages look'} different from production**${link ? ` · [See them before and after](${link}#changes)` : ''}\n\n| Page | What changed | Blocks |\n|---|---|---|\n${lines.join('\n')}${impacted.length > 20 ? `\n| and ${impacted.length - 20} more | | |` : ''}\n\n`;
+  } else if (base?.pages) md += `**No page looks different from production.**\n\n`;
+
   // Issues: new on the preview, and production issues this branch no longer has on the pages it checked.
   const known = new Set((base?.issues || []).map((i) => i.fingerprint));
   const fresh = data.issues.filter((i) => !known.has(i.fingerprint));
@@ -100,4 +125,28 @@ async function publish(md, event, out) {
     const r = mine ? await gh(`/issues/comments/${mine.id}`, { method: 'PATCH', body: JSON.stringify({ body: md }) }) : await gh(`/issues/${pr.number}/comments`, { method: 'POST', body: JSON.stringify({ body: md }) });
     console.log(r.ok ? `Pagewise: review ${mine ? 'updated' : 'posted'} on #${pr.number}.` : `Pagewise: could not comment on #${pr.number} (${r.status}). Give the workflow "pull-requests: write" to get the review on the pull request.`);
   }
+}
+
+// Uploads the preview snapshots of the impacted pages and records the review; returns the link to it in Pagewise.
+async function uploadReview(impacted, { data, site, out, event, base }) {
+  const api = (process.env.PAGEWISE_API_URL || '').replace(/\/$/, '');
+  if (!api || !process.env.PAGEWISE_TOKEN) return null;
+  const auth = { authorization: 'Bearer ' + process.env.PAGEWISE_TOKEN };
+  try {
+    const pr = event.pull_request?.number || '';
+    const meta = { sha: event.deployment?.sha || event.sha || event.pull_request?.head?.sha || process.env.GITHUB_SHA, branch: event.branches?.[0]?.name || event.deployment?.ref || event.pull_request?.head?.ref || '', pr, site };
+    const res = await fetch(api + '/api/reviews', { method: 'POST', headers: { 'content-type': 'application/json', ...auth }, body: JSON.stringify({ meta, pages: impacted.map((x) => ({ path: x.path, id: data.pages[x.path].id, css: data.pages[x.path].css || [] })) }) });
+    if (!res.ok) return null;
+    const { reviewId, projectId, uploads, css } = await res.json();
+    const { put } = await import('@vercel/blob');
+    const cssUrl = {};
+    for (const [h, u] of Object.entries(css || {})) { try { cssUrl[h] = (await put(u.pathname, fs.readFileSync(path.join(out, 'css', h + '.css')), { access: 'public', token: u.clientToken, contentType: 'text/css', addRandomSuffix: false, allowOverwrite: true })).url; } catch {} }
+    let i = 0;
+    await Promise.all(Array.from({ length: 6 }, async () => { while (i < impacted.length) { const x = impacted[i++]; const u = uploads?.[x.path]; if (!u) continue; try {
+      const html = fs.readFileSync(path.join(out, 'snapshots', data.pages[x.path].id + '.html'), 'utf8').replace(/__PW_CSS__\/([0-9a-f]+)\.css/g, (m, h) => cssUrl[h] || m);
+      x.after = JSON.stringify({ html: (await put(u.pathname, html, { access: 'public', token: u.clientToken, contentType: 'text/html', addRandomSuffix: true })).url });
+    } catch {} } }));
+    await fetch(api + '/api/reviews/' + reviewId + '/pages', { method: 'POST', headers: { 'content-type': 'application/json', ...auth }, body: JSON.stringify({ pages: impacted }) });
+    return `${api}/viewer.html?p=${projectId}&review=${reviewId}`;
+  } catch (e) { console.warn('Pagewise: could not upload the review snapshots', String(e.message || e)); return null; }
 }

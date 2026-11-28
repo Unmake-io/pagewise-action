@@ -179,6 +179,22 @@ async function worker() {
           agents: { fakeButtons: fake, jsonld: ld, renderedText: (document.body.innerText || '').replace(/\s+/g, ' ').trim().length },
         };
       }, origin);
+      // Content blocks with a hash each, so the next scan (or a preview) can tell which parts of the page changed.
+      const blocks = await page.evaluate(() => {
+        const hash = (s) => { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0; return h.toString(36); };
+        const path = (el) => { const parts = []; while (el && el !== document.body && parts.length < 14) { const p = el.parentElement; if (!p) break; const same = [...p.children].filter((c) => c.tagName === el.tagName); parts.unshift(el.tagName.toLowerCase() + (same.length > 1 ? `:nth-of-type(${same.indexOf(el) + 1})` : '')); el = p; } return 'body > ' + parts.join(' > '); };
+        const out = []; let n = 0;
+        for (const el of document.body.querySelectorAll('header, nav, footer, section, article, aside, main > div, h1, h2, h3, h4, p, li, a, button, img, picture, svg, form, table, figure, blockquote, label, input, select, textarea, [class*="card"]')) {
+          if (++n > 1500 || out.length >= 450) break;
+          if (el.closest('svg') && el.tagName.toLowerCase() !== 'svg') continue;
+          const r = el.getBoundingClientRect(); if (r.width < 8 || r.height < 8) continue;
+          const cs = getComputedStyle(el); if (cs.visibility === 'hidden' || cs.display === 'none' || +cs.opacity === 0) continue;
+          const text = (el.innerText || el.getAttribute('alt') || el.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim().slice(0, 600);
+          const look = [cs.color, cs.backgroundColor, cs.fontSize, cs.fontWeight, cs.fontFamily.split(',')[0], cs.borderRadius, cs.borderTopWidth, cs.borderTopColor, cs.paddingTop, cs.paddingLeft, cs.gap, cs.boxShadow, el.tagName === 'IMG' ? '' : Math.round(r.width / 12), el.tagName === 'IMG' ? '' : Math.round(r.height / 12), el.getAttribute('src') || '', el.getAttribute('href') || ''].join('|');
+          out.push([path(el), hash(el.tagName + '|' + text + '|' + look), hash(el.tagName + '|' + text)]);
+        }
+        return out;
+      }).catch(() => []);
       t.read = Date.now() - t0 - t.load;
       // Pages from the same dynamic route share their template: the accessibility audit runs on the first one only.
       // Pages from the same dynamic route share their template: the costly colour-contrast rule runs on the first
@@ -220,7 +236,8 @@ async function worker() {
       try { for (const c of (await cdp.send('Network.getAllCookies')).cookies) { const k = c.name + '@' + c.domain; if (seenCookies.has(k)) continue; seenCookies.add(k); cookies.push({ name: c.name, domain: c.domain, secure: c.secure, httpOnly: c.httpOnly, sameSite: c.sameSite || null, session: c.session, days: c.expires > 0 ? Math.round((c.expires * 1000 - Date.now()) / 864e5) : 0 }); } } catch {}
       const sec = Object.fromEntries(['strict-transport-security', 'content-security-policy', 'content-security-policy-report-only', 'x-frame-options', 'x-content-type-options', 'referrer-policy', 'permissions-policy', 'access-control-allow-origin', 'access-control-allow-credentials', 'server', 'x-powered-by'].map((h) => [h, hdr[h] || null]));
       const hops = resp ? resp.request().redirectChain().map((r) => r.url()) : [];
-      results.push({ ...q, id, status: resp?.status() ?? 0, finalPath, redirected: finalPath !== q.path, xRobots: hdr['x-robots-tag'] || null, hops, headers: sec, cookies, ...data, ...extra, axe, timing: t, capturedHeight: Math.min(fullH, MAX_CAPTURE_HEIGHT), snapshot: true, image: snap.needsImage });
+      fs.mkdirSync(path.join(outDir, 'blocks'), { recursive: true }); fs.writeFileSync(path.join(outDir, 'blocks', id + '.json'), JSON.stringify(blocks));
+      results.push({ ...q, id, blocks: blocks.length, status: resp?.status() ?? 0, finalPath, redirected: finalPath !== q.path, xRobots: hdr['x-robots-tag'] || null, hops, headers: sec, cookies, ...data, ...extra, axe, timing: t, capturedHeight: Math.min(fullH, MAX_CAPTURE_HEIGHT), snapshot: true, image: snap.needsImage });
       process.stdout.write('.');
     } catch (e) {
       results.push({ ...q, id, status: 0, error: String(e.message || e).slice(0, 200) });

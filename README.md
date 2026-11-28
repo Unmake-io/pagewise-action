@@ -12,8 +12,10 @@ snapshot of each, and deterministic checks, no AI:
 - **DESIGN.md**: the design rules measured on the live site (tokens and where they are declared, the primary button,
   text sizes, hard-coded colours, drift), for your coding agent to read before it touches the UI.
 
-On a **preview** deployment it compares the preview with the last production scan and writes the review (pages added
-or removed, changed titles and canonicals, new issues, issues fixed) to the job summary and to one comment on the pull
+Every production scan records which pages changed since the previous one (text, layout, styles), with the page
+before and after. On a **preview** deployment it compares the preview with the last production scan and writes the review (pages added
+or removed, pages that look different and links to see them before and after, changed titles and canonicals, new
+issues, issues fixed) to the job summary and to one comment on the pull
 request, kept up to date.
 
 Read-only on your code: it checks out the repo to read its routes and loads your pages. Its only write is the review

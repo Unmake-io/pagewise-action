@@ -118,6 +118,8 @@ if (kind === 'review') {
 if (process.env.PAGEWISE_API_URL && process.env.PAGEWISE_TOKEN) {
   const api = process.env.PAGEWISE_API_URL.replace(/\/$/, '');
   const auth = { authorization: 'Bearer ' + process.env.PAGEWISE_TOKEN };
+  // What production looked like before this deployment: used to record which pages changed.
+  const before = await fetch(api + '/api/state', { headers: auth }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
   const res = await fetch(api + '/api/scans', { method: 'POST', headers: { 'content-type': 'application/json', ...auth }, body: JSON.stringify({ meta, data }) });
   if (!res.ok) { console.error('Pagewise: upload failed with status', res.status, await res.text()); process.exit(1); }
   const { scanId, uploads, css } = await res.json();
@@ -141,11 +143,31 @@ if (process.env.PAGEWISE_API_URL && process.env.PAGEWISE_TOKEN) {
           c.html = (await put(u.html.pathname, html, { access: 'public', token: u.html.clientToken, contentType: 'text/html', addRandomSuffix: true })).url;
         }
       }
+      const bf = path.join(out, 'blocks', id + '.json');
+      if (u.blocks && fs.existsSync(bf)) c.blocks = (await put(u.blocks.pathname, fs.readFileSync(bf, 'utf8'), { access: 'public', token: u.blocks.clientToken, contentType: 'application/json', addRandomSuffix: true })).url;
       const img = path.join(out, 'thumbs', id + '.jpg');
       if (u.image && fs.existsSync(img)) c.image = (await put(u.image.pathname, fs.readFileSync(img), { access: 'public', token: u.image.clientToken, contentType: 'image/jpeg', addRandomSuffix: true })).url;
     } catch (e) { console.warn('Pagewise: upload failed for', pagePath, String(e.message || e)); }
     if (c.html || c.image) captures[pagePath] = c;
   });
-  const c = await fetch(api + '/api/scans/' + scanId + '/captures', { method: 'POST', headers: { 'content-type': 'application/json', ...auth }, body: JSON.stringify({ captures }) });
+  // Pages that changed since the previous scan, with the parts that changed (before and after snapshots).
+  const { diffBlocks, blocksOf } = await import('./changes.mjs');
+  const changes = [];
+  if (before?.pages) {
+    const pool = async (items, fn) => { let i = 0; await Promise.all(Array.from({ length: 8 }, async () => { while (i < items.length) await fn(items[i++]); })); };
+    await pool(Object.keys(data.pages), async (pagePath) => {
+      const prev = before.pages[pagePath], cur = captures[pagePath];
+      if (!cur) return;
+      if (!prev) { if (Object.keys(before.pages).length) changes.push({ path: pagePath, kind: 'added', before: null, after: JSON.stringify(cur) }); return; }
+      const old = await blocksOf(prev.capture);
+      const bf = path.join(out, 'blocks', data.pages[pagePath].id + '.json');
+      const now = fs.existsSync(bf) ? JSON.parse(fs.readFileSync(bf, 'utf8')) : null;
+      const d = diffBlocks(old, now);
+      if (d) changes.push({ path: pagePath, kind: 'changed', changes: d, before: prev.capture, after: JSON.stringify(cur) });
+    });
+    if (!only) for (const [pagePath, prev] of Object.entries(before.pages)) if (!data.pages[pagePath] && prev.capture) changes.push({ path: pagePath, kind: 'removed', before: prev.capture, after: null });
+  }
+  const c = await fetch(api + '/api/scans/' + scanId + '/captures', { method: 'POST', headers: { 'content-type': 'application/json', ...auth }, body: JSON.stringify({ captures, changes }) });
+  if (changes.length) console.log(`Pagewise: ${changes.length} page(s) changed since the previous scan: ${changes.slice(0, 8).map((x) => x.path).join(', ')}${changes.length > 8 ? '…' : ''}`);
   console.log('Pagewise: ' + Object.keys(captures).length + ' page snapshots saved' + (c.ok ? '.' : ' (recording them failed: ' + c.status + ').'));
 }
